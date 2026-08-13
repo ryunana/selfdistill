@@ -1,0 +1,18 @@
+# 生成的产物（build 输出，不提交）
+dist/
+
+# 使用者的原始聊天（隐私，绝不提交）
+input/*
+!input/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# 系统
+.DS_Store
+
+# 本地真实敏感 L3（不提交）
+canonical/03-l3-private.md
