@@ -17,6 +17,10 @@ selfstill 是一个「AI 自我蒸馏」工具包，把你在 ChatGPT / Claude /
 
 > 数据默认留在本机；「蒸馏」这一步要调云端 AI，提交给模型的内容受该供应商数据政策约束。
 
+> **[在线查看 HTML Demo →](https://ryunana.github.io/selfstill/)**
+>
+> 无需安装，示例内容全部为虚构数据；可以直接查看 L1–L4 分层、内容分布、设计原则和协同流程。
+
 ## 快速了解
 
 ```bash
@@ -26,19 +30,31 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
 
 ## 快速开始
 
-1. **整理聊天记录**：按 `docs/intake.md` 把各来源导出整理成统一 Markdown，放进 `input/`。
-2. **蒸馏**：用 `prompts/distill.md` 喂给你选择的 AI，生成 L1–L4 候选。
-3. **填 canonical**：确认后把结果填进 `canonical/`（参考 `templates/` 空白模板和 `canonical/` 里的虚构样例「张三」）。
-4. **构建**：
-   ```bash
-   python3 build.py
+你不需要先学会 Python。整个流程可以理解成：**你负责导出和确认，AI 负责整理、蒸馏、生成和写回。**
+
+### 使用者要做的
+
+1. 在你要蒸馏的 AI 工具里按对应入口导出聊天记录；各来源的导出入口和文件说明见 [`docs/intake.md`](docs/intake.md)。
+2. 把导出的文件和这个仓库交给你正在使用的 AI（例如 Codex、Claude Code 或 Hermes），然后直接告诉它：
+
+   ```text
+   请接手这个 selfstill 项目：
+   1. 按 docs/intake.md 整理我提供的聊天记录，原始记录只放在 input/，不要提交到 Git；
+   2. 按 prompts/distill.md 提炼 L1–L4 候选，逐条给我确认；
+   3. 未经我确认，不要写入 canonical/；
+   4. 我确认后再更新 canonical/ 并运行 python3 build.py；
+   5. 如果要写回 Codex 或 Hermes，先展示 diff，得到我明确确认后再执行 install.py。
    ```
-   生成 `dist/index.html` 及 L1–L4 可视化/原始报告页面 + `dist/codex/` + `dist/hermes/`。
-5. **写回**（可选）：
-   ```bash
-   python3 install.py --target codex     # 或 hermes
-   ```
-   展示 diff → 你确认 → 增量写入 `~/.codex` 或 `~/.hermes`。只做三件事：不存在则新建、存在则替换标记块间内容、无标记则追加，不覆盖你已有的无关内容。
+
+3. 查看 AI 给出的候选，逐条确认、修改或拒绝。需要写回 AI 工具时，再确认一次 diff。
+
+### AI 要做的
+
+1. 阅读 `docs/intake.md`，把使用者导出的记录整理成统一 Markdown，放进已被 Git 忽略的 `input/`。
+2. 按 `prompts/distill.md` 提炼 L1–L4 候选；先展示来源和候选，不直接改正式档案。
+3. 只把使用者确认过的内容写进 `canonical/`（结构参考 `templates/`，仓库里的「张三」是虚构样例）。
+4. 运行 `python3 build.py`，生成 `dist/index.html`、L1–L4 报告以及 `dist/codex/`、`dist/hermes/`。
+5. 如使用者要写回，运行 `python3 install.py --target codex`（或 `hermes`）：先展示 diff，等使用者明确确认后再增量写入，不覆盖无关内容。
 
 ## 支持矩阵
 
