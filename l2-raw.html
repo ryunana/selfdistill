@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L2 决策逻辑</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{interpolate-size:allow-keywords}
+html.theme-dark{--bg:#0A0A0A;--surface:#141414;--surface-hover:#1C1C1C;--border:rgba(255,255,255,.06);--text:#EDEDED;--text-secondary:#888;--accent:#3b82f6;--positive:#10b981;--negative:#f43f5e;--warning:#f59e0b}
+html.theme-light{--bg:#FAFAF9;--surface:#FFFFFF;--surface-hover:#F5F5F4;--border:rgba(0,0,0,.08);--text:#0f172a;--text-secondary:#64748b;--accent:#2563eb;--positive:#059669;--negative:#e11d48;--warning:#d97706}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Noto Sans CJK SC','PingFang SC','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;letter-spacing:-.01em;font-feature-settings:'cv11','ss01';transition:background .3s,color .3s;scrollbar-gutter:stable;overflow-x:hidden}
+h1,h2,h3,h4{color:var(--text);letter-spacing:-.03em;line-height:1.08;text-wrap:balance}
+h1{font-weight:700}h2{font-weight:600}
+p,li,td,th,span,label{color:var(--text)}
+code{background:var(--surface-hover);padding:.15em .4em;border-radius:3px;font-size:.85em;color:var(--accent);font-family:'SF Mono','Fira Code',monospace}
+.wrap{max-width:1100px;margin:0 auto;padding:0 1.25rem}
+.sibling-nav{position:sticky;top:0;z-index:100;background:var(--bg);border-bottom:1px solid var(--border);padding:.75rem 0;margin:0 -1.25rem 2rem;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.sibling-nav-inner{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;padding:0 1.25rem}
+.sibling-nav .back{color:var(--text-secondary);text-decoration:none;font-size:.85rem;padding:.4rem .75rem;border-radius:6px;transition:all .15s}
+.sibling-nav .back:hover{color:var(--text);background:var(--surface)}
+.sibling-nav .divider{color:var(--border);user-select:none}
+.sibling-nav .pill{padding:.4rem .85rem;border-radius:999px;font-size:.8rem;text-decoration:none;transition:all .15s;border:1px solid var(--border);color:var(--text-secondary)}
+.sibling-nav .pill:hover{background:var(--surface);color:var(--text)}
+.sibling-nav .pill.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.sibling-nav .pill.original{color:var(--text-secondary);font-size:.75rem;padding:.3rem .65rem}
+.hero{padding:3rem 0 2rem}
+.hero h1{font-size:clamp(2rem,4.5vw,3rem);margin-bottom:.75rem;letter-spacing:-.04em}
+.hero .sub{font-size:1.05rem;color:var(--text-secondary);max-width:680px}
+.eyebrow{display:inline-block;padding:.3rem .75rem;border:1px solid var(--border);border-radius:999px;font-size:.75rem;color:var(--text-secondary);margin-bottom:1rem;background:var(--surface)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;transition:box-shadow .2s ease}
+.card:hover{box-shadow:0 0 0 1px var(--border),0 8px 16px rgba(0,0,0,.08)}
+.section{margin:3rem 0}
+.section-head{display:flex;align-items:baseline;gap:1rem;margin-bottom:1.25rem}
+.section-head h2{font-size:1.5rem}
+.section-head .num{width:30px;height:30px;border-radius:8px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.9rem;flex:0 0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem}
+.tcard{padding:1.5rem;border-radius:12px;border:1px solid var(--border);position:relative;overflow:hidden;background:var(--surface)}
+.tcard.ok{background:linear-gradient(135deg,rgba(16,185,129,.08),rgba(16,185,129,.02));border-color:rgba(16,185,129,.3)}
+.tcard.ok-2{background:linear-gradient(135deg,rgba(59,130,246,.08),rgba(59,130,246,.02));border-color:rgba(59,130,246,.3)}
+.tcard.warn{background:linear-gradient(135deg,rgba(245,158,11,.08),rgba(245,158,11,.02));border-color:rgba(245,158,11,.3)}
+.tcard.danger{background:linear-gradient(135deg,rgba(244,63,94,.08),rgba(244,63,94,.02));border-color:rgba(244,63,94,.3)}
+.tcard.purple{background:linear-gradient(135deg,rgba(139,92,246,.08),rgba(139,92,246,.02));border-color:rgba(139,92,246,.3)}
+.tcard .ticon{font-size:1.5rem;margin-bottom:.5rem;display:block}
+.tcard h3{font-size:1.05rem;margin-bottom:.5rem}
+.tcard ul{list-style:none;margin:0;padding:0;font-size:.85rem;color:var(--text-secondary)}
+.tcard ul li{padding:.3rem 0;border-bottom:1px dashed var(--border)}
+.tcard ul li:last-child{border-bottom:none}
+.tcard p{font-size:.85rem;color:var(--text-secondary)}
+.plain-table{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-top:1rem}
+.plain-table table{width:100%;border-collapse:collapse}
+.plain-table th,.plain-table td{padding:.75rem 1rem;text-align:left;font-size:.85rem;border-bottom:1px solid var(--border)}
+.plain-table th{background:var(--surface-hover);font-weight:600;color:var(--text-secondary);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
+.plain-table tr:last-child td{border-bottom:none}
+.anti-list{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-top:1rem}
+.anti-list ul{list-style:none;padding:0;margin:0}
+.anti-list li{padding:.5rem 0;border-bottom:1px solid var(--border);font-size:.9rem;display:flex;align-items:flex-start;gap:.75rem}
+.anti-list li:last-child{border-bottom:none}
+.anti-list li::before{content:"❌";flex:0 0 auto}
+.anti-list li .cat{color:var(--negative);font-weight:600;min-width:140px;display:inline-block}
+.flow4{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-top:1rem}
+.flow-step{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.25rem;position:relative;transition:transform .2s}
+.flow-step:hover{transform:translateY(-2px)}
+.flow-step .step-num{position:absolute;top:-12px;left:16px;background:var(--accent);color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.85rem}
+.flow-step h4{font-size:1rem;margin:.5rem 0 .25rem}
+.flow-step .file{font-size:.75rem;color:var(--accent);font-family:'SF Mono',monospace;margin-bottom:.5rem;display:inline-block;padding:.15rem .5rem;background:var(--surface-hover);border-radius:5px}
+.flow-step p{font-size:.85rem;color:var(--text-secondary);margin:0}
+.note{color:var(--text-secondary);font-size:.9rem;margin-bottom:1rem}
+.banner{padding:.9rem 1.1rem;border-radius:10px;font-size:.9rem;margin:1.5rem 0;border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.07);color:var(--warning)}
+.original-doc{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:2rem;margin:2rem 0}
+.original-doc pre{font-family:'SF Mono','Fira Code','Noto Sans CJK SC',monospace;font-size:.82rem;line-height:1.65;white-space:pre-wrap;word-break:break-word;color:var(--text);background:transparent}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+.animate{animation:fadeInUp .6s ease-out both}.animate.delay-1{animation-delay:.1s}.animate.delay-2{animation-delay:.2s}.animate.delay-3{animation-delay:.3s}.animate.delay-4{animation-delay:.4s}
+.reveal{opacity:0;transform:translateY(24px);transition:opacity .6s ease,transform .6s ease}.reveal.visible{opacity:1;transform:translateY(0)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.reveal{opacity:1;transform:none}}
+@media print{body{background:#fff!important;color:#000!important}.viz-menu,.sibling-nav,.reveal{display:revert;opacity:1!important;transform:none!important}.card{break-inside:avoid;border:1px solid #ddd;box-shadow:none}*{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
+.viz-menu{position:fixed;top:16px;right:16px;z-index:9999}
+.viz-menu-toggle{width:44px;height:44px;border-radius:12px;background:var(--surface);border:1px solid var(--border);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(12px);transition:all .2s}
+.viz-menu-toggle:hover{background:var(--surface-hover)}
+.viz-menu-dropdown{position:absolute;top:52px;right:0;min-width:200px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:8px;opacity:0;visibility:hidden;transform:translateY(-8px);transition:all .2s;backdrop-filter:blur(16px)}
+.viz-menu-dropdown.open{opacity:1;visibility:visible;transform:translateY(0)}
+.viz-menu-dropdown button{width:100%;padding:10px 14px;border:none;border-radius:8px;background:transparent;color:var(--text);font-size:14px;font-family:inherit;cursor:pointer;text-align:left;display:flex;align-items:center;gap:10px;transition:background .15s}
+.viz-menu-dropdown button:hover{background:var(--surface-hover)}
+footer{margin-top:4rem;padding:2rem 0;border-top:1px solid var(--border);text-align:center;color:var(--text-secondary);font-size:.85rem}
+
+.simulated-marker{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important;}
+.simulated-banner{margin:.7rem 0 0;color:var(--text-secondary);font-size:.78rem;letter-spacing:.02em;}
+</style>
+</head>
+<body>
+<main class="wrap"><header class="hero"><a class="back" href="index.html">← 返回主页</a><h1>L2 决策逻辑 · 原始报告</h1><p class="simulated-banner">以下内容为虚构示例，不代表真实个人身份。</p></header><pre style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.3rem 1.5rem;font-family:Menlo,monospace;font-size:.84rem;line-height:1.7;white-space:pre-wrap;overflow-wrap:break-word"># 决策逻辑（L2）— <span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 虚构人物张三怎么判断
+
+&gt; 本文件描述一个**虚构设计师张三**面对决策时通常怎么想。**L1 管行为（怎么配合），L2 管判断（怎么想）**——与 L1 重复的内容不在本文件复述，引用 L1 规则名即可。
+&gt; 本 demo 中的职业、作品、内容实验与领域案例均为脱敏后的模拟数据，不对应真实个人经历。
+&gt; 标记：`[stable]` 长期稳定原则 · `[contextual]` 仅特定领域适用 · `[temporary]` 阶段策略，需复核或过期。
+&gt; 加载策略：核心模块随涉及判断的任务加载；领域模块只在对应任务时加载。
+
+---
+
+## 核心模块（stable，通用）
+
+### 一、产品与需求判断
+
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 版本只做少量高优先级**：一版只做 3 件左右的事，明确高中低排序；暂时不做的明确“跳过”，不为求全铺开。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 先想明白再动手**：有 idea 先按产品逻辑想清楚用户、痛点、价值等基本问题，再谈方案。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 数据型 vs 内容型**：能用系统数据判断出来的才算数据类风险/数据类功能；凭内容描述的归另一类，不要混。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 指标口径必须可解释**：统计窗口、分子分母、样本范围与对照组都要说清楚，不能模糊。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 功能边界要明确**：不校验的就不写校验；配置项语义要准确命名。
+
+### 二、AI 场景判断
+
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 默认倾向：AI 的用途 = 提效或可行性验证**，不是把流程系统化；表达上“用 AI 重构低效流程，而非叠加功能”。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] AI 能力要设计成客户愿意付费的产品**：量化 AI 成本可以加速付费，也能帮助团队判断投入产出。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 判断场景值不值得做**：识别高价值 AI 应用点 → 从 1 到 10 复制 → 复盘/淘汰低价值 → 再识别，形成闭环；不能只写数字。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[temporary] 模型选型**：目前“谁好谁便宜用谁”，订阅优先于按次付费 API——随价格与能力变化，需复核。
+
+### 三、问题处理框架
+
+面对复杂问题，先判断属于哪一类，再调用对应思路（默认一次只串一个主框架；反例：问题确实多线独立时允许并行）：
+
+| 情况 | 先做的事 |
+|---|---|
+| <span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 多个因素纠缠，抓不住重点 | 找主要矛盾——解决了它，其他随之缓解 |
+| <span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 信息不足就要下判断 | 先调查再发言，没有调查就没有发言权 |
+| <span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 有方案/假说需要验证 | 用实践检验，事实规定结论而非相反 |
+| <span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 多任务争夺资源 | 一次只做一件大事，断其一指再说 |
+| <span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 多目标需要平衡 | 看清每对关系的两面，不走极端 |
+| <span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 工作告一段落 | 诚实审视，承认错误，不遮掩 |
+
+### 四、项目治理
+
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] plan 要过审**：AI 写好 plan 后，交由另一个 AI 结合项目情况审核一遍再执行——按风险和规模触发：新项目/大改动必须过审一次，小任务直接做。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 不硬扛，要拆解**：复杂任务 → 拆成子任务 → 评估需要什么能力/工具 → 逐个推进，不闷头跑。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 遇到未知先做有边界的调查**：①记录卡点 ②搜索学习 ③实验验证 ④沉淀文档；确认受环境/权限/能力限制后明确报告，不无限尝试。
+
+---
+
+## 领域模块（contextual，按任务加载）
+
+### 五、设计与作品集（设计/作品集模拟任务时加载）
+
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[contextual] 作品集项目公式**：一两句话说明项目解决了什么问题、服务什么人；再用几个点说明设计判断、取舍过程与最终结果。结果导向，每个字打在读者真正关心的地方。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[contextual] 设计优势写法**：把视觉、交互、产品判断串起来，说明为什么这样设计、验证了什么，不只展示漂亮界面。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[contextual] 项目案例要有证据**：用户问题、关键约束、方案迭代和验证结果要能互相对应；没有证据的地方明确标注为模拟示例。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[temporary] 作品集方向**：目前优先整理 B 端工具与 AI 交互案例，具体方向随目标岗位与反馈复核。
+
+### 六、文案与内容（写作/文案/发布任务时加载）
+
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[contextual] 产品语境文案**：面向具体用户时，可以直接、具体、朗朗上口，但不能过度承诺。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 内容分享**：普通人读得懂；结论保真、不装没翻过的车。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[contextual] 摄影与旅行内容**：先讲真实体验，再讲路线、器材或技巧；不把普通体验包装成“必打卡”。
+
+### 七、个人项目实验（个人项目/内容创作任务时加载）
+
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[stable] 试错原则**：可接受短期无进账和小步快跑试错；不能接受多次试错后 MVP 还跑不通。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[temporary] 内容方向**：摄影记录 + 旅行笔记作为低成本实验方向；具体主题、平台与频率随反馈复核。
+- **<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>** **[contextual] 实验复盘**：记录目标、成本、路径、交付与翻车点；结果不理想也保留，避免只展示成功案例。
+</pre></main>
+<script>
+function toggleMenu(){var d=document.getElementById('vizMenuDropdown');if(d)d.classList.toggle('open')}
+document.addEventListener('click',function(e){if(!e.target.closest('.viz-menu')){var d=document.getElementById('vizMenuDropdown');if(d)d.classList.remove('open')}});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){var d=document.getElementById('vizMenuDropdown');if(d)d.classList.remove('open')}});
+var savedTheme=localStorage.getItem('viz-theme');
+var currentTheme=savedTheme||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+function applyTheme(t){document.documentElement.className='theme-'+t;var i=document.getElementById('themeIcon'),l=document.getElementById('themeLabel');if(i)i.textContent=t==='dark'?'🌙':'☀️';if(l)l.textContent=t==='dark'?'Dark':'Light';localStorage.setItem('viz-theme',t);currentTheme=t}
+function cycleTheme(){applyTheme(currentTheme==='dark'?'light':'dark')}
+applyTheme(currentTheme);
+document.querySelectorAll('[data-reveal]').forEach(function(el){el.classList.add('reveal')});
+var ro=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('visible');ro.unobserve(e.target)}})},{threshold:.15});
+document.querySelectorAll('.reveal').forEach(function(el){ro.observe(el)});
+</script>
+</body>
+</html>

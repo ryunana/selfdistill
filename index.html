@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>selfstill · 蒸馏我</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{interpolate-size:allow-keywords}
+html.theme-dark{--bg:#0A0A0A;--surface:#141414;--surface-hover:#1C1C1C;--border:rgba(255,255,255,.06);--text:#EDEDED;--text-secondary:#888;--accent:#3b82f6;--accent-secondary:#8b5cf6;--positive:#10b981;--negative:#f43f5e;--warning:#f59e0b}
+html.theme-light{--bg:#FAFAF9;--surface:#FFFFFF;--surface-hover:#F5F5F4;--border:rgba(0,0,0,.08);--text:#0f172a;--text-secondary:#64748b;--accent:#2563eb;--accent-secondary:#7c3aed;--positive:#059669;--negative:#e11d48;--warning:#d97706}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Noto Sans CJK SC','PingFang SC','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;letter-spacing:-.01em;font-feature-settings:'cv11','ss01';transition:background .3s,color .3s;scrollbar-gutter:stable;overflow-x:hidden}
+h1,h2,h3,h4,h5,h6{color:var(--text);letter-spacing:-.03em;line-height:1.08;text-wrap:balance}
+h1{font-weight:700}h2{font-weight:600}
+body,p,li,td,th,span,label{font-weight:400}
+p,li,td,th,span,label{color:var(--text)}
+.text-secondary{color:var(--text-secondary)}
+code{background:var(--surface-hover);padding:.15em .4em;border-radius:3px;font-size:.85em;color:var(--accent);font-family:'SF Mono','Fira Code',monospace}
+
+.wrap{max-width:1100px;margin:0 auto;padding:0 1.25rem}
+
+/* ===== HERO ===== */
+.hero{padding:5rem 0 3rem;text-align:center}
+.hero h1{font-size:clamp(2rem,5vw,3.4rem);margin-bottom:1rem;letter-spacing:-.04em}
+.hero .sub{font-size:1.1rem;color:var(--text-secondary);max-width:720px;margin:0 auto 1.5rem}
+.eyebrow{display:inline-block;padding:.35rem .85rem;border:1px solid var(--border);border-radius:999px;font-size:.8rem;color:var(--text-secondary);margin-bottom:1.5rem;background:var(--surface)}
+.hero-meta{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;font-size:.85rem;color:var(--text-secondary)}
+.hero-meta span{display:inline-flex;align-items:center;gap:.35rem}
+
+/* ===== KPI SECTION ===== */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin:3rem 0}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;text-align:center;transition:transform .2s,box-shadow .2s}
+.kpi:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.12)}
+.kpi .num{font-size:2.4rem;font-weight:700;color:var(--accent);letter-spacing:-.04em;line-height:1}
+.kpi .label{color:var(--text-secondary);font-size:.85rem;margin-top:.5rem;display:block;text-transform:uppercase;letter-spacing:.05em}
+.kpi .hint{font-size:.75rem;color:var(--text-secondary);margin-top:.4rem;display:block}
+
+/* ===== CARD ===== */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;transition:box-shadow .2s ease}
+.card:hover{box-shadow:0 0 0 1px var(--border),0 8px 16px rgba(0,0,0,.08)}
+
+/* ===== FILE CARDS ===== */
+.file-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:2rem 0}
+.file-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.5rem;display:flex;flex-direction:column;gap:.75rem;position:relative;overflow:hidden;transition:all .25s}
+.file-card::before{content:"";position:absolute;inset:0;border-radius:14px;padding:1px;background:linear-gradient(135deg,var(--c1,#3b82f6),var(--c2,#8b5cf6));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:0;transition:opacity .25s;pointer-events:none}
+.file-card:hover::before{opacity:.6}
+.file-card .tag{display:inline-block;padding:.2rem .6rem;border-radius:6px;font-size:.7rem;background:var(--surface-hover);color:var(--c1,#3b82f6);font-weight:600;align-self:flex-start;letter-spacing:.04em}
+.file-card h3{font-size:1.25rem;margin-bottom:.25rem}
+.file-card .role{color:var(--text-secondary);font-size:.85rem;font-style:italic}
+.file-card .desc{font-size:.9rem;color:var(--text);margin:.5rem 0;line-height:1.5}
+.file-card .stats{display:flex;justify-content:space-between;align-items:baseline;padding-top:.75rem;border-top:1px solid var(--border);font-size:.8rem;color:var(--text-secondary)}
+.file-card .stats b{color:var(--text);font-weight:600;font-size:1.1rem}
+.file-card .chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.25rem}
+.file-card .chips i{font-style:normal;font-size:.72rem;padding:.15rem .5rem;border-radius:999px;background:var(--surface-hover);color:var(--text-secondary);border:1px solid var(--border)}
+.file-card .links{display:flex;gap:.5rem;margin-top:auto;padding-top:.75rem}
+.file-card .links a{flex:1;text-align:center;padding:.55rem .75rem;border:1px solid var(--border);border-radius:8px;font-size:.82rem;color:var(--text);text-decoration:none;transition:all .15s;background:var(--bg)}
+.file-card .links a:hover{background:var(--surface-hover);border-color:var(--accent);color:var(--accent)}
+.file-card .links a.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.file-card .links a.primary:hover{opacity:.9;color:#fff}
+
+/* file color variants */
+.fc-l1{--c1:#3b82f6;--c2:#2563eb}
+.fc-l2{--c1:#8b5cf6;--c2:#a855f7}
+.fc-l3{--c1:#10b981;--c2:#059669}
+.fc-pb{--c1:#f59e0b;--c2:#d97706}
+
+/* ===== RATIO BAR ===== */
+.ratio-section{padding:2rem 0}
+.ratio-bar{display:flex;height:32px;border-radius:8px;overflow:hidden;margin:1.5rem 0;border:1px solid var(--border)}
+.ratio-bar .seg{display:flex;align-items:center;justify-content:center;font-size:.75rem;color:#fff;font-weight:600;overflow:hidden;white-space:nowrap}
+.seg-l1{flex:10;background:linear-gradient(90deg,#3b82f6,#2563eb)}
+.seg-l2{flex:16;background:linear-gradient(90deg,#8b5cf6,#a855f7)}
+.seg-l3{flex:24;background:linear-gradient(90deg,#10b981,#059669)}
+.seg-pb{flex:50;background:linear-gradient(90deg,#f59e0b,#d97706)}
+.ratio-legend{display:flex;flex-wrap:wrap;gap:1rem;font-size:.85rem;color:var(--text-secondary)}
+.ratio-legend span{display:flex;align-items:center;gap:.4rem}
+.ratio-legend i{width:12px;height:12px;border-radius:3px;display:inline-block}
+
+/* ===== ARCHITECTURE DIAGRAM ===== */
+.arch{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:2rem;margin:2rem 0}
+.arch .layer{display:flex;align-items:center;gap:1rem;padding:.9rem 1.1rem;margin:.5rem 0;border-radius:10px;color:#fff;font-weight:500;transition:transform .2s}
+.arch .layer:hover{transform:translateX(4px)}
+.arch .layer .name{font-weight:700;min-width:130px}
+.arch .layer .role{font-size:.85rem;opacity:.92}
+.arch .layer .question{flex:1;text-align:right;font-size:.75rem;opacity:.85;font-style:italic;font-weight:400}
+.layer-l1{background:linear-gradient(90deg,#3b82f6,#2563eb)}
+.layer-l2{background:linear-gradient(90deg,#8b5cf6,#a855f7)}
+.layer-l3{background:linear-gradient(90deg,#10b981,#059669)}
+.layer-pb{background:linear-gradient(90deg,#f59e0b,#d97706)}
+
+/* ===== EXAMPLE ===== */
+.example{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin:1.5rem 0}
+.example .quote{font-style:italic;color:var(--text);border-left:3px solid var(--accent);padding:.75rem 1rem;background:var(--surface-hover);border-radius:0 6px 6px 0;margin-bottom:1rem}
+.example table{width:100%;border-collapse:collapse}
+.example th,.example td{padding:.55rem .8rem;text-align:left;border-bottom:1px solid var(--border);font-size:.85rem}
+.example th{color:var(--text-secondary);font-weight:600;font-size:.75rem;text-transform:uppercase}
+.example th:first-child,.example td:first-child{color:var(--text);font-weight:500}
+.example td .who{font-size:.72rem;color:var(--text-secondary);display:block}
+
+/* ===== PRINCIPLES TABLE ===== */
+.principles{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:2rem 0}
+.principles table{width:100%;border-collapse:collapse}
+.principles th{background:var(--surface-hover);padding:1rem;font-weight:600;text-align:left;font-size:.8rem;text-transform:uppercase;color:var(--text-secondary)}
+.principles td{padding:.9rem 1rem;border-top:1px solid var(--border);font-size:.9rem}
+.principles tr:hover td{background:var(--surface-hover)}
+.principles code{background:var(--surface-hover);padding:.15em .4em;border-radius:3px;font-size:.85em;color:var(--accent);font-family:'SF Mono','Fira Code',monospace}
+
+/* ===== SECTION ===== */
+section{margin:4rem 0}
+.section-head{display:flex;align-items:baseline;gap:1rem;margin-bottom:1.5rem}
+.section-head h2{font-size:1.6rem}
+.section-head .num{flex:0 0 auto;width:34px;height:34px;border-radius:10px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1rem}
+.section-head .hint{margin-left:auto;color:var(--text-secondary);font-size:.85rem}
+
+/* ===== ANIMATIONS ===== */
+@keyframes fadeInUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.animate{animation:fadeInUp .6s ease-out both}
+.animate.delay-1{animation-delay:.1s}.animate.delay-2{animation-delay:.2s}.animate.delay-3{animation-delay:.3s}.animate.delay-4{animation-delay:.4s}.animate.delay-5{animation-delay:.5s}
+.reveal{opacity:0;transform:translateY(24px);transition:opacity .6s ease,transform .6s ease}
+.reveal.visible{opacity:1;transform:translateY(0)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.reveal{opacity:1;transform:none}}
+
+/* ===== PRINT ===== */
+@media print{body{background:#fff!important;color:#000!important}.viz-menu,.reveal{display:revert;opacity:1!important;transform:none!important}.card{break-inside:avoid;border:1px solid #ddd;box-shadow:none}*{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
+@page{margin:1in}
+
+/* ===== MENU ===== */
+.viz-menu{position:fixed;top:16px;right:16px;z-index:9999}
+.viz-menu-toggle{width:44px;height:44px;border-radius:12px;background:var(--surface);border:1px solid var(--border);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(12px);transition:all .2s}
+.viz-menu-toggle:hover{background:var(--surface-hover)}
+.viz-menu-dropdown{position:absolute;top:52px;right:0;min-width:200px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:8px;opacity:0;visibility:hidden;transform:translateY(-8px);transition:all .2s;backdrop-filter:blur(16px)}
+.viz-menu-dropdown.open{opacity:1;visibility:visible;transform:translateY(0)}
+.viz-menu-dropdown button{width:100%;padding:10px 14px;border:none;border-radius:8px;background:transparent;color:var(--text);font-size:14px;font-family:inherit;cursor:pointer;text-align:left;display:flex;align-items:center;gap:10px;transition:background .15s}
+.viz-menu-dropdown button:hover{background:var(--surface-hover)}
+
+.skip-to-content{position:absolute;top:-40px;left:6px;background:var(--accent);color:#fff;padding:8px 12px;text-decoration:none;border-radius:4px;opacity:0;pointer-events:none;transition:all .2s;z-index:10000}
+.skip-to-content:focus{top:6px;opacity:1;pointer-events:auto}
+
+footer{margin-top:4rem;padding:2rem 0;border-top:1px solid var(--border);text-align:center;color:var(--text-secondary);font-size:.85rem}
+footer a{color:var(--accent);text-decoration:none}
+footer a:hover{text-decoration:underline}
+
+.simulated-marker{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important;}
+.simulated-banner{margin:.7rem 0 0;color:var(--text-secondary);font-size:.78rem;letter-spacing:.02em;}
+</style>
+</head>
+<body>
+
+<div class="viz-menu">
+  <button class="viz-menu-toggle" onclick="toggleMenu()" aria-label="Menu">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="5" x2="17" y2="5"/><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="15" x2="17" y2="15"/></svg>
+  </button>
+  <div class="viz-menu-dropdown" id="vizMenuDropdown">
+    <button onclick="cycleTheme()"><span id="themeIcon">🌙</span><span id="themeLabel">Dark</span></button>
+    <button onclick="window.print()"><span>🖨️</span><span>Print / PDF</span></button>
+  </div>
+</div>
+<main id="main-content" class="wrap" role="main"><header class="hero animate"><span class="eyebrow">selfstill · 蒸馏我</span><h1>selfstill · 蒸馏我<br>4 层蒸馏架构可视化</h1><p class="sub">把和 AI 的聊天记录，蒸馏成看得见、带来源、AI 也用得上的个人档案。<br>L1 管行为 · L2 管判断 · L3 管事实 · L4 管方法 — 每一条都有来源，每一条都要经你确认。</p><p class="simulated-banner">以下内容为虚构示例，不代表真实个人身份。</p><div class="hero-meta"><span>📁 canonical：<code>canonical/</code></span><span>🔗 双载体：Hermes Skill + Codex Profile</span><span>🔒 L3 含敏感块，默认不加载</span></div></header><section data-reveal class="reveal"><div class="kpis"><div class="kpi animate delay-1"><div class="num" data-count="4" data-suffix="">4</div><div class="label">核心层</div><div class="hint">行为 / 判断 / 事实 / 方法</div></div><div class="kpi animate delay-2"><div class="num" data-count="29" data-suffix="K">29K</div><div class="label">canonical 总字节</div><div class="hint">含 3 个领域手册</div></div><div class="kpi animate delay-3"><div class="num" data-count="3" data-suffix="">3</div><div class="label">领域手册</div><div class="hint">按任务加载，不全量常驻</div></div><div class="kpi animate delay-4"><div class="num" data-count="2" data-suffix="">2</div><div class="label">部署载体</div><div class="hint">Hermes + Codex 同步</div></div></div></section><section data-reveal class="reveal"><div class="section-head"><span class="num">1</span><h2>4 个核心文件</h2><span class="hint">职责分离 · 互不重叠 · 冲突时按优先级裁决</span></div><div class="file-grid"><div class="file-card fc-l1 animate delay-1"><span class="tag">🛡️ 协作契约</span><h3>L1 · 协作契约</h3><p class="role">怎么配合 — 授权边界 + 反馈信号 + 汇报规则 + 优先级</p><p class="desc">用户核心资产。定义<strong>与用户配合的方式</strong>：结论先行、说人话、动态事实先查询、错了就认、变动透明汇报。<br><br><b>关键设计：</b>授权三档（只分析→不动 / 实现→放手 / 对外→先确认）、强反馈信号与弱信号分流、冲突时按 6 级优先级裁决，L3 永远不能发出行为命令。</p><div class="chips"><i>身份锚定</i><i>授权边界</i><i>反馈信号</i><i>汇报规则</i><i>优先级 1-6</i></div><div class="stats"><span>canonical 字节</span><b>3.1K</b></div><div class="links"><a href="l1.html" class="primary">📊 可视化版</a><a href="l1-raw.html">📄 原始报告</a></div></div><div class="file-card fc-l2 animate delay-2"><span class="tag">🧭 决策逻辑</span><h3>L2 · 决策逻辑</h3><p class="role">怎么判断 — 取舍原则 + 优先级 + 红线 + 稳定性标记</p><p class="desc"><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 描述<strong>面对一个决策时虚构示例使用者通常怎么想</strong>，让 AI 按这套示例思路给建议、写方案。<br><br><b>关键设计：</b>核心模块（产品判断 / AI 场景 / 问题框架 / 项目治理）随涉及判断的任务加载；领域模块（设计作品集 / 文案 / 摄影旅行）只在对口任务加载；每条原则标注稳定性，temporary 条目自动进入复核。</p><div class="chips"><i>产品与需求</i><i>AI 场景</i><i>问题框架</i><i>项目治理</i><i>设计作品集</i><i>文案内容</i><i>摄影旅行</i></div><div class="stats"><span>canonical 字节</span><b>5.4K</b></div><div class="links"><a href="l2.html" class="primary">📊 可视化版</a><a href="l2-raw.html">📄 原始报告</a></div></div><div class="file-card fc-l3 animate delay-3"><span class="tag">👤 用户画像</span><h3>L3 · 用户画像</h3><p class="role">用户是谁 — 领域分块 + 敏感分级</p><p class="desc">把使用者当成具体的人：设计职业、家庭、健康、旅行、兴趣、内容实验、AI 使用背景。<br><br><b>关键设计：</b>按领域分块、只加载当前任务需要的块；真实敏感块默认不加载；演示数据标注 <code>as_of</code> 和 <code>simulated</code> 状态。</p><div class="chips"><i>基本信息</i><i>设计作品集</i><i>工作能力</i><i>家庭关系 🔒</i><i>健康财务 🔒</i><i>旅行</i><i>兴趣生活</i><i>内容实验</i><i>AI 背景</i></div><div class="stats"><span>canonical 字节</span><b>5.4K</b></div><div class="links"><a href="l3.html" class="primary">📊 可视化版</a><a href="l3-raw.html">📄 原始报告</a></div></div><div class="file-card fc-pb animate delay-4"><span class="tag">📚 领域打法</span><h3>L4 · 领域打法</h3><p class="role">按任务类型 — 深度领域操作手册</p><p class="desc">L1/L2/L3 之上的第三级加载：具体领域怎么做。已沉淀多个手册，随项目沉淀持续扩充。<br><br><b>关键设计：</b>每个 playbook 绑定一个技能/领域，任务进入该领域时才加载——不稀释常驻上下文。</p><div class="chips"><i>智能体协作</i><i>产品规划</i><i>写作风格</i></div><div class="stats"><span>canonical 字节</span><b>14.9K</b></div><div class="links"><a href="l4.html" class="primary">📊 可视化版</a><a href="l4-raw.html">📄 原始报告</a></div></div></div></section><section data-reveal class="reveal"><div class="section-head"><span class="num">2</span><h2>分层架构 — 职责清晰，互不重叠</h2></div><div class="arch animate"><div class="layer layer-l1"><span class="name">L1 · 协作契约</span><span class="role">怎么配合</span><span class="question">授权边界 + 反馈信号 + 汇报规则 + 优先级</span></div><div class="layer layer-l2"><span class="name">L2 · 决策逻辑</span><span class="role">怎么判断</span><span class="question">取舍原则 + 优先级 + 红线 + 稳定性标记</span></div><div class="layer layer-l3"><span class="name">L3 · 用户画像</span><span class="role">用户是谁</span><span class="question">领域分块 + 敏感分级</span></div><div class="layer layer-pb"><span class="name">L4 · 领域打法</span><span class="role">按任务类型</span><span class="question">深度领域操作手册</span></div></div><p style="color:var(--text-secondary);font-size:.9rem;text-align:center;margin-top:.5rem">💡 冲突时按优先级裁决：平台安全 &gt; 用户当前指令 &gt; 任务上下文 &gt; L1 &gt; L2 &gt; L3 — <strong>用户当前明确要求永远高于历史画像</strong>。</p></section><section data-reveal class="reveal"><div class="section-head"><span class="num">3</span><h2>canonical 内容分布 ≈ 11 : 19 : 19 : 51</h2><span class="hint">越往下越重 · 按需加载</span></div><div class="ratio-section card animate"><div class="ratio-bar" role="img" aria-label="canonical 内容分布 11:19:19:51"><div class="seg seg-l1" style="flex:11">L1 11%</div><div class="seg seg-l2" style="flex:19" title="19%">L2 19%</div><div class="seg seg-l3" style="flex:19" title="19%">L3 19%</div><div class="seg seg-pb" style="flex:51" title="51%">L4 51%</div></div><div class="ratio-legend"><span><i style="background:#3b82f6"></i>L1 最薄 — 行为规则必须精炼，常驻不耗 token</span><span><i style="background:#8b5cf6"></i>L2 中等 — 判断逻辑要覆盖但不啰嗦</span><span><i style="background:#10b981"></i>L3 分块 — 按领域切分，只加载需要的块</span><span><i style="background:#f59e0b"></i>L4 最重 — 领域深度只在对应任务加载</span></div></div></section><section data-reveal class="reveal"><div class="section-head"><span class="num">4</span><h2>协同示例 — 一条反馈从进入到响应 <small><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 虚构演示</small></h2><span class="hint"><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 用户说「这个方案我看不懂」</span></div><div class="example animate"><p class="quote"><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 每个步骤都有明确的文件来源，没有「AI 自己看着办」的模糊地带。</p><table><thead><tr><th>步骤</th><th>文件</th><th>决策</th></tr></thead><tbody><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> ① 捕捉修正信号</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 · 协作契约</code></td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 「看不懂」是修正信号 → 当场照做调整</td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> ② 表达适配</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 · 协作契约</code></td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 技术内容翻译成业务语言：这是什么 / 为什么 / 影响什么</td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> ③ 判断路径</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L2 · 决策逻辑</code></td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 先想明白再动手 — 没听懂可能是方案本身没想清楚</td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> ④ 背景召回</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L3 · 用户画像</code></td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 只加载相关块，不碰敏感信息</td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> ⑤ 汇报方式</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 · 协作契约</code></td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 结论先行、说人话、改动说明 before/after</td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> ⑥ 沉淀闭环</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 蒸馏流程</code></td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 新偏好 → 确认后进 canonical，不自动改</td></tr></tbody></table></div></section><section data-reveal class="reveal"><div class="section-head"><span class="num">5</span><h2>核心设计原则</h2></div><div class="principles animate"><table><thead><tr><th>原则</th><th>体现</th><th>出处</th></tr></thead><tbody><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 分层架构</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 行为 / L2 判断 / L3 事实 / L4 领域，职责互不重叠</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> canonical/</code></td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L3 不发命令</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 用户画像只提供事实和默认偏好，不能发出行为命令</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 · 优先级</code></td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 用户指令最高</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 当前明确要求 &gt; 历史画像；画像不锁定用户</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 · 硬规则</code></td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 动态事实先查询</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 价格 / 时间 / 距离 / 开放状态先真实查询，严禁脑补</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 · 怎么配合</code></td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 修正即素材</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 「看不懂 / 不对」当场调整并记录候选，不靠事后回忆</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 · 捕捉修正</code></td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 弱信号不采集</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 回复变短 / 换话题不记录不归因——无法区分不满与忙碌</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L1 · 反馈信号</code></td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 分块加载</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> L3 按领域分块、L4 按任务加载，不整篇装入上下文</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 加载规则</code></td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 可信度标记</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 每条带 as_of 时间戳 + confirmed / 待确认</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 元数据</code></td></tr><tr><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 确认后才写入</td><td><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 候选经确认后才进 canonical，不自动改</td><td><code><span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span> 蒸馏流程</code></td></tr></tbody></table></div></section><section data-reveal class="reveal"><div class="section-head"><span class="num">6</span><h2>维护闭环 — 蒸馏不是一次性的</h2><span class="hint">手动更新 · 用户把关</span></div><div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"><div class="kpi animate delay-1"><div class="num">①</div><div class="label">追加</div><div class="hint">新对话整理成统一 Markdown，放进 input/</div></div><div class="kpi animate delay-2"><div class="num">②</div><div class="label">蒸馏</div><div class="hint">重跑 prompts/distill.md 的蒸馏 prompt</div></div><div class="kpi animate delay-3"><div class="num">③</div><div class="label">确认</div><div class="hint">diff 逐条确认后进 canonical</div></div><div class="kpi animate delay-4"><div class="num">④</div><div class="label">构建</div><div class="hint">python3 build.py + install.py 写回 AI 工具</div></div></div></section></main><footer><p>canonical/ · selfstill 蒸馏我 — 让 AI 按使用者的思维方式配合</p><p style="margin-top:.5rem">L3 画像含 <code>[SENSITIVE]</code> 健康 / 财务 / 家庭细节，本页只展示结构与标签，不展示敏感原文；本页为示例数据</p></footer>
+<script>
+// === Menu ===
+function toggleMenu(){var dropdown=document.getElementById('vizMenuDropdown');if(dropdown)dropdown.classList.toggle('open')}
+document.addEventListener('click',function(e){if(!e.target.closest('.viz-menu')){var dropdown=document.getElementById('vizMenuDropdown');if(dropdown)dropdown.classList.remove('open')}});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){var dropdown=document.getElementById('vizMenuDropdown');if(dropdown)dropdown.classList.remove('open')}});
+
+// === Theme ===
+var savedTheme=localStorage.getItem('viz-theme');
+var currentTheme=savedTheme||(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+function applyTheme(t){document.documentElement.className='theme-'+t;document.getElementById('themeIcon').textContent=t==='dark'?'🌙':'☀️';document.getElementById('themeLabel').textContent=t==='dark'?'Dark':'Light';localStorage.setItem('viz-theme',t);currentTheme=t}
+function cycleTheme(){applyTheme(currentTheme==='dark'?'light':'dark')}
+applyTheme(currentTheme);
+
+// === Scroll Reveal ===
+document.querySelectorAll('[data-reveal]').forEach(function(el){el.classList.add('reveal')});
+var revealObserver=new IntersectionObserver(function(entries){entries.forEach(function(e){if(e.isIntersecting){e.target.classList.add('visible');revealObserver.unobserve(e.target)}})},{threshold:.15});
+document.querySelectorAll('.reveal').forEach(function(el){revealObserver.observe(el)});
+
+// === Number Counter ===
+function animateCounters(){document.querySelectorAll('[data-count]').forEach(function(el){if(el.dataset.counted)return;el.dataset.counted='1';var target=parseFloat(el.dataset.count);var prefix=el.dataset.prefix||'';var suffix=el.dataset.suffix||'';var start=performance.now();var duration=1200;(function tick(now){var p=Math.min((now-start)/duration,1),eased=1-Math.pow(1-p,3);el.textContent=prefix+Math.round(target*eased).toLocaleString()+suffix;if(p<1)requestAnimationFrame(tick)})(start)})}
+var counterEls=document.querySelectorAll('[data-count]');
+if(counterEls.length>0){var cObs=new IntersectionObserver(function(entries){entries.forEach(function(e){if(e.isIntersecting){animateCounters();cObs.disconnect()}})},{threshold:.3});counterEls.forEach(function(el){cObs.observe(el)})}
+</script>
+</body>
+</html>
