@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.selfstill/schemas/inbox-v2.json",
+  "title": "selfstill Inbox Candidate v2",
+  "description": "One local, human-reviewable candidate. This schema is descriptive; distill_audit.py also enforces the rediscovery evidence rule.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "created_at",
+    "source",
+    "classification",
+    "change",
+    "evidence_ids",
+    "conflicts",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 2},
+    "id": {
+      "type": "string",
+      "minLength": 8,
+      "pattern": "^[a-z0-9][a-z0-9._-]+$"
+    },
+    "created_at": {"type": "string", "minLength": 10},
+    "source": {
+      "type": "object",
+      "required": ["type", "reference", "quote"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "minLength": 1},
+        "reference": {"type": "string", "minLength": 1},
+        "quote": {"type": "string"}
+      }
+    },
+    "classification": {
+      "type": "object",
+      "required": [
+        "feedback_type",
+        "target_layer",
+        "target_section",
+        "scope",
+        "sensitivity"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "feedback_type": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "target_layer": {"enum": ["L1", "L2", "L3", "L4", "unknown"]},
+        "target_section": {"type": "string"},
+        "scope": {
+          "enum": ["universal", "contextual", "temporary", "one_off", "unknown"]
+        },
+        "sensitivity": {"enum": ["normal", "sensitive"]}
+      }
+    },
+    "change": {
+      "type": "object",
+      "required": ["scene", "wrong", "correct", "proposed_action"],
+      "additionalProperties": false,
+      "properties": {
+        "scene": {"type": "string"},
+        "wrong": {"type": "string"},
+        "correct": {"type": "string"},
+        "proposed_action": {"type": "string"}
+      }
+    },
+    "evidence_ids": {
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^ev-[0-9a-f]{16}$"}
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "status": {"enum": ["pending", "accepted", "rejected", "unknown"]}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {"type": {"pattern": "^rediscovery"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {"evidence_ids": {"minItems": 1}}
+      }
+    }
+  ]
+}

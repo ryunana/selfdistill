@@ -69,6 +69,18 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
 
 追加到 `input/` → 重跑同一蒸馏 prompt → 人工确认 diff → `python3 build.py`（+ `install.py` 如需要）。无需任何调度器。
 
+## 持续更新自己的档案
+
+第一次蒸馏完成后，可以用本地 inbox 保留后续对话中的明确修正、表达偏差和边界补充：
+
+1. 按 [`schemas/inbox-v2.json`](schemas/inbox-v2.json) 在 `inbox/` 新建一个候选 JSON。直接来自对话的候选可以先把 `evidence_ids` 留空，状态使用 `pending`。
+2. 运行 `python3 distill_audit.py audit`。它会递归读取 `canonical/**/*.md` 和 `inbox/*.json`，生成完整的 `reports/latest/` 证据包与六维覆盖报告；`inbox/README.md` 只作为说明登记。
+3. 把 [`prompts/rediscovery.md`](prompts/rediscovery.md) 交给你当前选择的 AI，并要求它从头到尾阅读 `reports/latest/evidence.md`。它只能把发现和待确认候选写回 `reports/`，不会自动修改 `canonical/`。
+4. 运行 `python3 distill_audit.py verify reports/latest`，确认来源没有漂移、候选格式正确、所有 evidence 引用真实存在，再逐条接受、拒绝或标记为未知。
+5. 由你人工把确认后的内容更新到 `canonical/`，然后继续使用原有 `python3 build.py`；确实需要写回 Codex 或 Hermes 时，再展示 diff 并明确确认 `install.py --target ...`。
+
+`inbox/*.json`、`reports/`、`input/` 和 `dist/` 都是本机数据或生成物，默认被 Git 忽略；仓库只保留 inbox 说明和 `input/.gitkeep`。数据默认留在本机，但如果你把 `evidence.md` 交给云端 AI，仍须遵守该模型供应商的数据政策。不要把真实聊天、候选或报告提交到公开仓库。
+
 ## 依赖
 
 纯 Python 标准库，无第三方依赖（Python 3.9+）。
