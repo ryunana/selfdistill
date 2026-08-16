@@ -1,9 +1,16 @@
 # 生成的产物（build 输出，不提交）
 dist/
 
+# 持续蒸馏本地报告（可能含敏感证据，不提交）
+reports/
+
 # 使用者的原始聊天（隐私，绝不提交）
 input/*
 !input/.gitkeep
+
+# 使用者的持续蒸馏候选（只保留说明文件）
+inbox/*
+!inbox/README.md
 
 # Python
 __pycache__/

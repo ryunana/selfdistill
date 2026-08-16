@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "id": "conversation-example-02",
+  "created_at": "2026-08-16T13:00:00+08:00",
+  "source": {
+    "type": "conversation",
+    "reference": "fixture conversation turn 7",
+    "quote": "[SIMULATED] Confirm the boundary before writing."
+  },
+  "classification": {
+    "feedback_type": ["boundary"],
+    "target_layer": "L1",
+    "target_section": "authorization",
+    "scope": "universal",
+    "sensitivity": "normal"
+  },
+  "change": {
+    "scene": "[SIMULATED] A local implementation task",
+    "wrong": "[SIMULATED] Expanding the requested scope",
+    "correct": "[SIMULATED] Preserve the named ownership boundary",
+    "proposed_action": "[SIMULATED] Keep as a pending candidate"
+  },
+  "evidence_ids": [],
+  "conflicts": [],
+  "status": "accepted"
+}
