@@ -126,9 +126,10 @@ def _safe_title(value, default: str = "未命名会话") -> str:
     return _safe_scalar(value) or default
 
 
-def _record_fallback_id(source: str, file_name: str, record_index: int) -> str:
-    return f"{source}-fp-" + hashlib.sha1(
-        f"{source}|{file_name}|{record_index}".encode("utf-8")).hexdigest()[:12]
+def _usable_conversation_id(value) -> Optional[str]:
+    """Provider conversation IDs must be scalar and nonblank to own a file."""
+    value = _safe_scalar(value)
+    return value if value and value.strip() else None
 
 
 def _stable_id(role: str, t: Optional[str], text: str) -> str:
@@ -278,9 +279,13 @@ def parse_chatgpt(path: Path) -> tuple:
             skipped.append((f.name, SKIP_BAD))
             continue
         total += len(data or [])
-        for record_index, conv in enumerate(data or [], 1):
+        for conv in data or []:
             if not isinstance(conv, dict):
                 skipped.append((f.name, "会话条目结构损坏"))
+                continue
+            base = _usable_conversation_id(conv.get("id"))
+            if base is None:
+                skipped.append(("—", "ChatGPT 会话 ID 无效"))
                 continue
             mapping = conv.get("mapping") or {}
             if not isinstance(mapping, dict):
@@ -368,7 +373,6 @@ def parse_chatgpt(path: Path) -> tuple:
                 continue
             branching = not has_valid_current and len(valid) > 1
             for index, (node_path, msgs) in enumerate(valid, 1):
-                base = _safe_scalar(conv.get("id")) or _record_fallback_id("chatgpt", f.name, record_index)
                 cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
                 title = _safe_title(conv.get("title"))
                 if branching:
@@ -511,9 +515,15 @@ def _gemini_user_text(lines: list[str], provider_indexes: Optional[set[int]] = N
 
 def parse_gemini(path: Path) -> tuple:
     """Split Takeout activity containers; never invent a global conversation stream."""
-    target = path if path.is_file() else next(iter(path.rglob("我的活动记录.html")), None)
-    if target is None:
-        raise ImportError_(f"未找到 我的活动记录.html：{path}")
+    if path.is_file():
+        target = path
+    else:
+        candidates = sorted(path.rglob("我的活动记录.html"))
+        if not candidates:
+            raise ImportError_("未找到 Gemini 活动文件")
+        if len(candidates) > 1:
+            raise ImportError_("Gemini 活动文件候选不唯一")
+        target = candidates[0]
     try:
         parser = _GeminiActivityExtractor()
         parser.feed(target.read_text(encoding="utf-8"))
@@ -585,7 +595,9 @@ def parse_gemini(path: Path) -> tuple:
     convs = []
     activity_occurrences: dict[str, int] = {}
     for activity in sorted(activities, key=lambda a: (a["time"], a["user"])):
-        activity_key = f"{activity['time']}\x1f{activity['user']}\x1f{activity['answer'] or ''}"
+        # Answers can arrive later in Takeout.  Prompt-side identity plus the
+        # stable parse-order occurrence keeps that later answer an update.
+        activity_key = f"{activity['time']}\x1f{activity['user']}"
         fingerprint = hashlib.sha1(activity_key.encode("utf-8")).hexdigest()[:16]
         occurrence = activity_occurrences.get(activity_key, 0) + 1
         activity_occurrences[activity_key] = occurrence
@@ -603,22 +615,26 @@ def parse_deepseek(path: Path) -> tuple:
     """conversations.json（或 zip）：mapping 树 + fragments（REQUEST/RESPONSE/THINK/FILE）。"""
     data = None
     if path.is_dir():
-        files = list(path.rglob("conversations.json"))
+        files = sorted(path.rglob("conversations.json"))
         if not files:
-            raise ImportError_(f"未找到 conversations.json：{path}")
+            raise ImportError_("未找到 DeepSeek conversations.json")
+        if len(files) > 1:
+            raise ImportError_("DeepSeek conversations.json 候选不唯一")
         try:
             data = json.loads(files[0].read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-            raise ImportError_(f"无法读取 {files[0]}：{e}")
+            raise ImportError_("无法读取 DeepSeek conversations.json")
     elif str(path).endswith(".zip"):
         try:
             with zipfile.ZipFile(path) as z:
-                name = next((n for n in z.namelist() if n.endswith("conversations.json")), None)
-                if name is None:
-                    raise ImportError_(f"压缩包中未找到 conversations.json：{path}")
-                data = json.loads(z.read(name).decode("utf-8"))
+                names = sorted(n for n in z.namelist() if n.endswith("conversations.json"))
+                if not names:
+                    raise ImportError_("DeepSeek ZIP 未找到 conversations.json")
+                if len(names) > 1:
+                    raise ImportError_("DeepSeek ZIP conversations.json 候选不唯一")
+                data = json.loads(z.read(names[0]).decode("utf-8"))
         except (OSError, RuntimeError, zipfile.BadZipFile, UnicodeDecodeError, json.JSONDecodeError) as e:
-            raise ImportError_(f"无法解压/读取 {path}：{e}")
+            raise ImportError_("无法解压/读取 DeepSeek ZIP")
     else:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -632,9 +648,13 @@ def parse_deepseek(path: Path) -> tuple:
     skipped = []
     tool_count = 0
     total = len(data or [])
-    for record_index, conv in enumerate(data or [], 1):
+    for conv in data or []:
         if not isinstance(conv, dict):
             skipped.append(("conversations.json", "会话条目结构损坏"))
+            continue
+        base = _usable_conversation_id(conv.get("id"))
+        if base is None:
+            skipped.append(("—", "DeepSeek 会话 ID 无效"))
             continue
         mapping = conv.get("mapping") or {}
         if not isinstance(mapping, dict) or any(not isinstance(node, dict) for node in mapping.values()):
@@ -748,7 +768,6 @@ def parse_deepseek(path: Path) -> tuple:
             continue
         branching = len(outputs) > 1
         for index, (node_path, msgs) in enumerate(outputs, 1):
-            base = _safe_scalar(conv.get("id")) or _record_fallback_id("deepseek", "conversations.json", record_index)
             cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
             title = _safe_title(conv.get("title"))
             if branching:

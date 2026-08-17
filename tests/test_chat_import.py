@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+import zipfile
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -629,12 +630,9 @@ class ParserTests(unittest.TestCase):
                 "n": {"parent": None, "children": [], "message": {"id": {"secret": secret},
                     "author": {"role": "user"}, "content": {"parts": ["chatgpt visible"]}}},
             }}]), encoding="utf-8")
-            cg_first, _skipped, _total = ic.parse_chatgpt(chatgpt)
-            cg_second, _skipped, _total = ic.parse_chatgpt(chatgpt)
-            self.assertEqual(cg_first[0][1], cg_second[0][1])
-            self.assertTrue(cg_first[0][1].startswith("chatgpt-fp-"))
-            self.assertEqual(cg_first[0][2], "未命名会话")
-            self.assertEqual(cg_first[0][4][0][2], "n")
+            cg_first, cg_skipped, _total = ic.parse_chatgpt(chatgpt)
+            self.assertEqual(cg_first, [])
+            self.assertIn("ChatGPT 会话 ID 无效", [reason for _ref, reason in cg_skipped])
 
             deepseek = root / "conversations.json"
             deepseek.write_text(json.dumps([{"id": [secret], "title": {"secret": secret}, "mapping": {
@@ -642,9 +640,9 @@ class ParserTests(unittest.TestCase):
                     {"type": "REQUEST", "content": "deepseek visible"},
                 ]}},
             }}]), encoding="utf-8")
-            ds, _skipped, _total = ic.parse_deepseek(deepseek)
-            self.assertTrue(ds[0][1].startswith("deepseek-fp-"))
-            self.assertEqual(ds[0][2], "未命名会话")
+            ds, ds_skipped, _total = ic.parse_deepseek(deepseek)
+            self.assertEqual(ds, [])
+            self.assertIn("DeepSeek 会话 ID 无效", [reason for _ref, reason in ds_skipped])
 
             codex = root / "rollout-codex.jsonl"
             codex.write_text("\n".join(json.dumps(record) for record in [
@@ -667,11 +665,60 @@ class ParserTests(unittest.TestCase):
 
             out = root / "out"
             imported = {}
-            for conv in (cg_first[0], ds[0], cx, cl):
+            for conv in (cx, cl):
                 self.assertEqual(ic.write_conversation(conv, imported, out), "new")
             rendered = "\n".join(path.read_text(encoding="utf-8") for path in out.glob("*.md"))
             self.assertNotIn(secret, rendered)
             self.assertNotIn(secret, json.dumps(imported, ensure_ascii=False))
+
+    def test_chatgpt_and_deepseek_invalid_conversation_ids_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            invalid_ids = [None, "", True, {"nested": 1}, ["nested"]]
+            chatgpt = root / "conversations-000.json"
+            chatgpt.write_text(json.dumps([{"id": cid, "mapping": {
+                "n": {"parent": None, "children": [], "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["visible"]}}},
+            }} for cid in invalid_ids]), encoding="utf-8")
+            cg, cg_skipped, cg_total = ic.parse_chatgpt(chatgpt)
+            self.assertEqual((cg_total, cg), (len(invalid_ids), []))
+            self.assertEqual(sum(reason == "ChatGPT 会话 ID 无效" for _ref, reason in cg_skipped),
+                             len(invalid_ids))
+
+            deepseek = root / "conversations.json"
+            deepseek.write_text(json.dumps([{"id": cid, "mapping": {
+                "n": {"parent": None, "children": [], "message": {
+                    "fragments": [{"type": "REQUEST", "content": "visible"}]}},
+            }} for cid in invalid_ids]), encoding="utf-8")
+            ds, ds_skipped, ds_total = ic.parse_deepseek(deepseek)
+            self.assertEqual((ds_total, ds), (len(invalid_ids), []))
+            self.assertEqual(sum(reason == "DeepSeek 会话 ID 无效" for _ref, reason in ds_skipped),
+                             len(invalid_ids))
+
+    def test_gemini_and_deepseek_multiple_candidates_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name in ("one", "two"):
+                directory = root / name
+                directory.mkdir()
+                (directory / "我的活动记录.html").write_text("<div></div>", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "^Gemini 活动文件候选不唯一$"):
+                ic.parse_gemini(root)
+
+            deep_root = root / "deepseek"
+            for name in ("one", "two"):
+                directory = deep_root / name
+                directory.mkdir(parents=True)
+                (directory / "conversations.json").write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "^DeepSeek conversations\\.json 候选不唯一$"):
+                ic.parse_deepseek(deep_root)
+
+            archive = root / "deepseek.zip"
+            with zipfile.ZipFile(archive, "w") as z:
+                z.writestr("one/conversations.json", "[]")
+                z.writestr("two/conversations.json", "[]")
+            with self.assertRaisesRegex(ic.ImportError_, "^DeepSeek ZIP conversations\\.json 候选不唯一$"):
+                ic.parse_deepseek(archive)
 
     def test_claude_excludes_internal_records_not_marker_mentions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -991,6 +1038,29 @@ class ParserTests(unittest.TestCase):
             self.assertEqual([c[1] for c in first], [c[1] for c in second])
             self.assertEqual(len({c[1] for c in first}), 2)
             self.assertEqual(len({m[2] for c in first for m in c[4]}), 4)
+
+    def test_gemini_later_answer_updates_same_prompt_side_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'>
+<div class='header-cell'>2026年8月3日 下午4:05</div><div>Prompted：same prompt</div>
+</div>""", encoding="utf-8")
+            first, _skipped, _total = ic.parse_gemini(p)
+            out = Path(td) / "out"
+            imported = {}
+            self.assertEqual(ic.write_conversation(first[0], imported, out), "new")
+
+            p.write_text("""<div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：same prompt</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><p>later answer</p></div></div>""", encoding="utf-8")
+            second, _skipped, _total = ic.parse_gemini(p)
+            self.assertEqual(first[0][1], second[0][1])
+            self.assertEqual(first[0][4][0][2], second[0][4][0][2])
+            self.assertEqual(ic.write_conversation(second[0], imported, out), "update")
+            rendered = next(out.glob("*.md")).read_text(encoding="utf-8")
+            self.assertEqual(len(list(out.glob("*.md"))), 1)
+            self.assertIn("later answer", rendered)
 
 
 class FmtTimeTests(unittest.TestCase):
