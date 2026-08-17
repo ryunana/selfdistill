@@ -33,7 +33,7 @@ selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 A
 | message_id | 推荐每条消息保留原始消息 ID；没有则按文件中的消息序号（如 `#17`）定位 |
 | 授权附件 | 写明来源、所有者和本次授权范围；未获授权的附件不要放入输入 |
 
-来源标识建议：`chatgpt` / `gemini` / `deepseek` / `codex` / `claude` / `chatmemo`，可自定。
+来源标识建议：`chatgpt` / `gemini` / `deepseek` / `codex` / `claude`，可自定。
 
 ## 各来源怎么整理成统一 Markdown
 
@@ -50,12 +50,13 @@ selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 A
 2. 解压后路径为 `Takeout/我的活动/Gemini Apps/`，核心是 `我的活动记录.html`（含 Prompted / Gemini 轮次），其余是对话中上传/生成的附件。
 3. 打开 `我的活动记录.html`，按「Prompted」（你输入的）/「Gemini」（模型回复）轮次，按会话整理成统一 Markdown。
 
-### DeepSeek
+### DeepSeek（网页「数据管理」导出）
 
-网页导出 → 按会话整理成统一 Markdown。
+1. 网页左下角头像 → **系统设置** → **数据管理** → **导出所有历史对话**。
+2. 得到导出文件（JSON 或压缩包，按会话组织），按会话整理成统一 Markdown。
 
-### 本机 Codex / Claude Code / ChatMemo
+### 本机 Codex / Claude Code
 
-这些来源目前需要按上面的统一格式手工或半手工整理；仓库不提供自动导出脚本。
+这些来源的记录保存在本机目录，可以把整理工作交给正在使用的 AI 工具协助：把记录交给 AI，让它按上面的统一格式整理成 Markdown（原始记录仍只放在 `input/`）。
 
 整理完成后，把文件放进 `input/` 目录（该目录已被 `.gitignore` 忽略，不会提交到仓库）。这是手工/半手工整理格式，不代表仓库会自动导入、调用模型或读取任何平台账户。首次处理时，把统一 Markdown、现有 `canonical/` 和所需授权附件交给 AI，并使用 `prompts/distill.md`；它应先报告完整阅读边界，再提出候选，不直接写正式档案。
