@@ -1,7 +1,7 @@
 # PR #5 真实数据修复设计
 
-**状态：** 已由用户逐部分确认  
-**范围：** ChatGPT、Gemini、DeepSeek、本地 Codex、本地 Claude Code 导入  
+**状态：** 已由用户逐部分确认
+**范围：** ChatGPT、Gemini、DeepSeek、本地 Codex、本地 Claude Code 导入
 **原则：** 保留真实对话，不混入系统内容，不静默丢失，不伪造会话结构
 
 ## 1. 为什么要修

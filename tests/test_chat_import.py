@@ -478,6 +478,58 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(b"\r", raw)
         self.assertIn("第一行\n第二行".encode("utf-8"), raw)
 
+    def test_filename_sanitization_collision_fails_closed_in_batch_and_without_state(self) -> None:
+        out = self._tmp()
+        first = ("chatgpt", "a/b", "第一", "2026-08-01", [("user", None, "u1", "第一条")])
+        second = ("chatgpt", "a?b", "第二", "2026-08-01", [("user", None, "u2", "第二条")])
+        total, _outputs, new, updated, dup, skipped = ic.import_convs(
+            [first, second], [], 2, {}, out, dry_run=False)
+        self.assertEqual((total, new, updated, dup), (2, 1, 0, 0))
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("文件名冲突", skipped[0][1])
+        path = out / "chatgpt-a-b.md"
+        self.assertIn("第一条", path.read_text(encoding="utf-8"))
+        self.assertNotIn("第二条", path.read_text(encoding="utf-8"))
+
+        dry_out = out.parent / "dry-out"
+        _total, _outputs, dry_new, _updated, _dup, dry_skipped = ic.import_convs(
+            [first, second], [], 2, {}, dry_out, dry_run=True)
+        self.assertEqual(dry_new, 1)
+        self.assertEqual(len(dry_skipped), 1)
+        self.assertFalse(dry_out.exists())
+
+        # Interrupted state writes must not let a colliding header be overwritten.
+        with self.assertRaisesRegex(ic.ImportError_, "文件名冲突"):
+            ic.write_conversation(second, {}, out)
+        self.assertIn("第一条", path.read_text(encoding="utf-8"))
+
+        # A managed block alone does not establish ownership and must not be overwritten.
+        unowned = out.parent / "unowned"
+        unowned.mkdir()
+        unowned_path = unowned / "chatgpt-a-b.md"
+        original = "<!-- distill-messages:begin -->\n旧正文\n<!-- distill-messages:end -->\n"
+        unowned_path.write_text(original, encoding="utf-8")
+        with self.assertRaisesRegex(ic.ImportError_, "所有权元数据"):
+            ic.write_conversation(first, {}, unowned)
+        self.assertEqual(unowned_path.read_text(encoding="utf-8"), original)
+
+    def test_duplicate_restores_permissions_but_dry_run_is_write_free(self) -> None:
+        out = self._tmp()
+        conv = ("chatgpt", "private", "标题", "2026-08-01", [("user", None, "u", "正文")])
+        imported = {}
+        self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+        path = out / "chatgpt-private.md"
+        os.chmod(out, 0o755)
+        os.chmod(path, 0o644)
+        self.assertEqual(ic.write_conversation(conv, imported, out), "dup")
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        os.chmod(out, 0o755)
+        os.chmod(path, 0o644)
+        self.assertEqual(ic.write_conversation(conv, imported, out, dry_run=True), "dup")
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+
     def test_atomic_write_forces_tmp_permissions_before_replace(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "private.md"
@@ -533,6 +585,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertEqual(ic.imported_path(out).read_text(encoding="utf-8"), "{bad")
 
+    def test_imported_state_rejects_malformed_entries_without_rewriting(self) -> None:
+        cases = [
+            {"broken": 1},
+            {":cid": {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": []}},
+            {"chatgpt:": {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": []}},
+            {"chatgpt:x": {"path": 3, "imported_at": "2026-08-01", "title": "x", "message_ids": []}},
+            {"chatgpt:x": {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": ["m", "m"]}},
+        ]
+        for data in cases:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as td:
+                out = Path(td)
+                raw = json.dumps(data, ensure_ascii=False)
+                ic.imported_path(out).write_text(raw, encoding="utf-8")
+                with self.assertRaises(ic.ImportError_):
+                    ic.load_imported(out)
+                self.assertEqual(ic.imported_path(out).read_text(encoding="utf-8"), raw)
+
     def test_next_run_rebuilds_missing_state_from_existing_markdown(self) -> None:
         out = self._tmp()
         args = ["--source", "chatgpt", "--path", str(FIXTURE / "chatgpt"),
@@ -567,6 +636,17 @@ class CliTests(unittest.TestCase):
         r = run_import("--source", "chatgpt", "--path", str(bad), "--root", str(self._tmp()))
         self.assertEqual(r.returncode, 1)
         self.assertIn("损坏", r.stdout)  # 诚实报告：坏文件计入跳过，不静默
+
+    def test_empty_chatgpt_and_deepseek_exports_fail_with_no_messages(self) -> None:
+        for source, filename in (("chatgpt", "conversations-000.json"),
+                                 ("deepseek", "conversations.json")):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                export = Path(td) / filename
+                export.write_text("[]", encoding="utf-8")
+                r = run_import("--source", source, "--path", str(export),
+                               "--root", str(self._tmp()), "--yes")
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn("无消息", r.stdout)
 
     def test_local_dry_run_fixture_roots(self) -> None:
         codex_root = FIXTURE / "codex" / "sessions"

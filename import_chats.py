@@ -850,6 +850,23 @@ def load_imported(out_dir: Path) -> dict:
             raise ImportError_(f"状态文件损坏，未修改：{p}（请先恢复或移走该文件）：{e}")
         if not isinstance(data, dict):
             raise ImportError_(f"状态文件结构损坏，未修改：{p}（期望 JSON 对象）")
+        for key, entry in data.items():
+            if not isinstance(key, str) or ":" not in key:
+                raise ImportError_(f"状态文件结构损坏，未修改：{p}（会话键无效）")
+            state_source, state_cid = key.split(":", 1)
+            if not state_source or not state_cid:
+                raise ImportError_(f"状态文件结构损坏，未修改：{p}（会话键无效）")
+            if not isinstance(entry, dict):
+                raise ImportError_(f"状态文件结构损坏，未修改：{p}（会话 {key} 不是对象）")
+            path = entry.get("path")
+            imported_at = entry.get("imported_at")
+            title = entry.get("title")
+            message_ids = entry.get("message_ids")
+            if (not isinstance(path, str) or not path or not isinstance(imported_at, str)
+                    or not isinstance(title, str) or not isinstance(message_ids, list)
+                    or any(not isinstance(mid, str) or not mid for mid in message_ids)
+                    or len(message_ids) != len(set(message_ids))):
+                raise ImportError_(f"状态文件结构损坏，未修改：{p}（会话 {key} 字段无效）")
         return data
     return {}
 
@@ -886,6 +903,28 @@ def _state_entry(path: Path, title: str, msgs: list) -> dict:
     }
 
 
+def _same_path(left, right) -> bool:
+    return os.path.abspath(os.fspath(left)) == os.path.abspath(os.fspath(right))
+
+
+def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
+                                  imported: dict) -> None:
+    """Fail closed when lossy filename sanitization would target another conversation."""
+    for other_key, entry in imported.items():
+        if other_key != key and isinstance(entry, dict) and isinstance(entry.get("path"), str):
+            if _same_path(entry["path"], path):
+                raise ImportError_(f"文件名冲突：{key} 与 {other_key} 都会写入 {path.name}")
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8")
+    old_sources = re.findall(r"^<!-- source: (.*?) -->\s*$", content, re.MULTILINE)
+    old_cids = re.findall(r"^<!-- conversation_id: (.*?) -->\s*$", content, re.MULTILINE)
+    if len(old_sources) != 1 or len(old_cids) != 1:
+        raise ImportError_(f"文件名冲突：{key} 的现有目标缺少或重复所有权元数据")
+    if (old_sources[0], old_cids[0]) != (source, cid):
+        raise ImportError_(f"文件名冲突：{key} 会覆盖现有会话 {old_sources[0]}:{old_cids[0]}")
+
+
 def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool = False) -> str:
     """Markdown is the source of truth; state is reconstructed from its final block."""
     source, cid, title, exported_at, msgs = conv
@@ -894,6 +933,7 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
     if len(ids) != len(set(ids)):
         raise ImportError_(f"会话 {key} 出现重复 message_id，拒绝写入")
     path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
+    _assert_no_filename_collision(source, cid, key, path, imported)
     desired = _render_messages(msgs)
     result = "new"
     if path.exists():
@@ -901,6 +941,8 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
         before, existing_body, after = _managed_parts(existing, path)
         if existing_body == desired:
             if not dry_run:
+                os.chmod(out_dir, 0o700)
+                os.chmod(path, 0o600)
                 imported[key] = _state_entry(path, title, msgs)
             return "dup"
         result = "update"
@@ -1042,12 +1084,20 @@ def run_source(source: str, path_arg: Optional[str], args, imported: dict,
 def import_convs(convs: list, skipped: list, total: int, imported: dict,
                  out_dir: Path, dry_run: bool) -> tuple:
     new = updated = dup = 0
+    if total == 0 and not convs and not skipped:
+        skipped.append(("导出文件", SKIP_EMPTY))
     for conv in convs:
         try:
             result = write_conversation(conv, imported, out_dir, dry_run)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
             skipped.append((conv[1], f"写入失败：{e}"))
             continue
+        if dry_run:
+            source, cid, title, _exported_at, msgs = conv
+            path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
+            # Keep only an in-memory claim: dry-run is write-free but must still
+            # report a second lossy filename in the same batch as a failure.
+            imported[f"{source}:{cid}"] = _state_entry(path, title, msgs)
         if result == "dup":
             dup += 1
         elif result == "update":

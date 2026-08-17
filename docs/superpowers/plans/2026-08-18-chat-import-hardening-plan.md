@@ -1,7 +1,7 @@
 # PR #5 导入器修复实施计划
 
-**依据：** `docs/superpowers/specs/2026-08-18-chat-import-hardening-design.md`  
-**实施范围：** `import_chats.py`、`tests/test_chat_import.py`、必要的脱敏 fixture、README 与 intake 说明  
+**依据：** `docs/superpowers/specs/2026-08-18-chat-import-hardening-design.md`
+**实施范围：** `import_chats.py`、`tests/test_chat_import.py`、必要的脱敏 fixture、README 与 intake 说明
 **不在范围：** 蒸馏 prompt、canonical 写回、云端模型、第三方依赖、通用插件框架
 
 ## 总体验收标准
