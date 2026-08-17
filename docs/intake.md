@@ -1,6 +1,6 @@
 # 统一 Markdown 输入格式（intake）
 
-selfstill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 AI 工具，先整理成同一种中性格式，AI 才能稳定地从中提炼 L1–L4。这一步是手工/半手工的，selfstill 不提供自动导入器。
+selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 AI 工具，先整理成同一种中性格式，AI 才能稳定地从中提炼 L1–L4。这一步是手工/半手工的，selfdistill 不提供自动导入器。
 
 ## 格式约定
 

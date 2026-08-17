@@ -19,7 +19,7 @@
 2. 每条尽量附来源（哪条消息、时间）和状态（`confirmed` / `待确认`）。
 3. 无法确认的信息标注「待确认」，不要当成事实写死。
 4. 敏感信息（健康/财务/家庭/身份细节）单独归到 L3 的「敏感信息」区，并标注 `[SENSITIVE]`。
-5. 输出按 selfstill 的 canonical 结构：`01-l1-contract.md` / `02-l2-decision-logic.md` / `03-l3-user-profile.md` / `04-domain-playbooks/*.md`（每个领域一个文件，frontmatter 含 `id` + `description`）。
+5. 输出按 selfdistill 的 canonical 结构：`01-l1-contract.md` / `02-l2-decision-logic.md` / `03-l3-user-profile.md` / `04-domain-playbooks/*.md`（每个领域一个文件，frontmatter 含 `id` + `description`）。
 
 ## 聊天记录
 

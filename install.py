@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selfstill install：把 dist/<target>/ 的产物确认后增量写入对应 AI 工具目录。
+"""selfdistill install：把 dist/<target>/ 的产物确认后增量写入对应 AI 工具目录。
 
 用法：
     python3 install.py --target codex     # 装到 ~/.codex

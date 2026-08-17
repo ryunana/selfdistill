@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selfstill build：读 canonical/ 生成 dist/（主页 + 内页，视觉层复用 showcase 模板）。
+"""selfdistill build：读 canonical/ 生成 dist/（主页 + 内页，视觉层复用 showcase 模板）。
 
 用法：
     python3 build.py               # 正常构建（私密 L3 默认排除）
@@ -397,8 +397,8 @@ def build_home(domains: list, sizes: dict, assets: dict) -> str:
 
     hero = (
         '<header class="hero animate">'
-        '<span class="eyebrow">selfstill · 蒸馏我</span>'
-        '<h1>selfstill · 蒸馏我<br>4 层蒸馏架构可视化</h1>'
+        '<span class="eyebrow">selfdistill · 蒸馏我</span>'
+        '<h1>selfdistill · 蒸馏我<br>4 层蒸馏架构可视化</h1>'
         '<p class="sub">把和 AI 的聊天记录，蒸馏成看得见、带来源、AI 也用得上的个人档案。<br>'
         'L1 管行为 · L2 管判断 · L3 管事实 · L4 管方法 — 每一条都有来源，每一条都要经你确认。</p>'
         '<p class="simulated-banner">以下内容为虚构示例，不代表真实个人身份。</p>'
@@ -537,13 +537,13 @@ def build_home(domains: list, sizes: dict, assets: dict) -> str:
 
     footer = (
         '<footer>'
-        '<p>canonical/ · selfstill 蒸馏我 — 让 AI 按使用者的思维方式配合</p>'
+        '<p>canonical/ · selfdistill 蒸馏我 — 让 AI 按使用者的思维方式配合</p>'
         '<p style="margin-top:.5rem">L3 画像含 <code>[SENSITIVE]</code> 健康 / 财务 / 家庭细节，本页只展示结构与标签，不展示敏感原文；本页为示例数据</p>'
         '</footer>'
     )
 
     body = f'<main id="main-content" class="wrap" role="main">{hero}{kpis}{files}{arch}{ratio}{example}{prin}{maintain}</main>{footer}'
-    return page("selfstill · 蒸馏我", VIZ_MENU + body, assets["index_css"], assets["index_js"])
+    return page("selfdistill · 蒸馏我", VIZ_MENU + body, assets["index_css"], assets["index_js"])
 
 
 # ---------- 内页 ----------
@@ -561,7 +561,7 @@ def build_layer(title: str, content: str, slug: str, sub: str, assets: dict) -> 
     )
     hero = (
         f'<header class="hero">'
-        f'<span class="eyebrow">selfstill · 蒸馏我</span>'
+        f'<span class="eyebrow">selfdistill · 蒸馏我</span>'
         f'<h1>{html.escape(title)}</h1>'
         f'<p class="sub">{sub}</p>'
         '<p class="simulated-banner">以下内容为虚构示例，不代表真实个人身份。</p>'
@@ -583,8 +583,8 @@ def build_raw(title: str, text: str, assets: dict) -> str:
 
 # ---------- target 产物 ----------
 
-CODEX_AGENTS_HEADER = ("# AGENTS.md — 用户协作契约（selfstill 生成）\n\n"
-                       "> 本文件由 selfstill 从 canonical 生成。L2 决策逻辑见 profile/decision-logic.md，"
+CODEX_AGENTS_HEADER = ("# AGENTS.md — 用户协作契约（selfdistill 生成）\n\n"
+                       "> 本文件由 selfdistill 从 canonical 生成。L2 决策逻辑见 profile/decision-logic.md，"
                        "L3 用户画像见 profile/user-profile.md。\n\n")
 
 HERMES_L1_FRONT = ('---\nname: personal-operating-profile\n'

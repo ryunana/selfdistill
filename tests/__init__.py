@@ -1,1 +1,1 @@
-"""Tests for the public selfstill toolkit."""
+"""Tests for the public selfdistill toolkit."""

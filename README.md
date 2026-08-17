@@ -1,10 +1,10 @@
-# selfstill · 蒸馏我
+# selfdistill · 蒸馏我
 
 把和 AI 的聊天记录，在 AI 辅助 + 人工确认下，蒸馏成**看得见、带来源、AI 也用得上**的个人档案。
 
 ## 这是什么
 
-selfstill 是一个「AI 自我蒸馏」工具包，把你在 ChatGPT / Claude / Codex / Gemini 等工具里的历史对话，提炼成 L1–L4 分级信息：
+selfdistill 是一个「AI 自我蒸馏」工具包，把你在 ChatGPT / Claude / Codex / Gemini 等工具里的历史对话，提炼成 L1–L4 分级信息：
 
 | 层级 | 内容 | 通俗解释 |
 |------|------|----------|
@@ -17,7 +17,7 @@ selfstill 是一个「AI 自我蒸馏」工具包，把你在 ChatGPT / Claude /
 
 > 数据默认留在本机；「蒸馏」这一步要调云端 AI，提交给模型的内容受该供应商数据政策约束。
 
-> **[在线查看 HTML Demo →](https://ryunana.github.io/selfstill/)**
+> **[在线查看 HTML Demo →](https://ryunana.github.io/selfdistill/)**
 >
 > 无需安装，示例内容全部为虚构数据；可以直接查看 L1–L4 分层、内容分布、设计原则和协同流程。
 
@@ -38,7 +38,7 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
 2. 把导出的文件和这个仓库交给你正在使用的 AI（例如 Codex、Claude Code 或 Hermes），然后直接告诉它：
 
    ```text
-   请接手这个 selfstill 项目：
+   请接手这个 selfdistill 项目：
    1. 按 docs/intake.md 整理我提供的聊天记录，原始记录只放在 input/，不要提交到 Git；
    2. 按 prompts/distill.md 提炼 L1–L4 候选，逐条给我确认；
    3. 未经我确认，不要写入 canonical/；
