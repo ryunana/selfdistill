@@ -359,8 +359,8 @@ class _GeminiActivityExtractor(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.blocks: list[tuple[list[str], set[int], set[int]]] = []
-        self._parts: list[tuple[str, bool, bool]] = []
+        self.blocks: list[tuple[list[str], set[int], set[int], set[int]]] = []
+        self._parts: list[tuple[str, bool, bool, bool]] = []
         self._depth = 0
         self._tags: list[tuple[str, set[str]]] = []
 
@@ -385,22 +385,27 @@ class _GeminiActivityExtractor(HTMLParser):
             self._tags.pop()
         self._depth -= 1
         if self._depth == 0:
-            lines = [text for text, _is_time, _is_field in self._parts]
+            lines = [text for text, _is_time, _is_field, _is_chrome in self._parts]
             if lines:
                 self.blocks.append((lines,
-                    {i for i, (_text, is_time, _is_field) in enumerate(self._parts) if is_time},
-                    {i for i, (_text, _is_time, is_field) in enumerate(self._parts) if is_field}))
+                    {i for i, (_text, is_time, _is_field, _is_chrome) in enumerate(self._parts) if is_time},
+                    {i for i, (_text, _is_time, is_field, _is_chrome) in enumerate(self._parts) if is_field},
+                    {i for i, (_text, _is_time, _is_field, is_chrome) in enumerate(self._parts) if is_chrome}))
 
     def handle_data(self, data):
         if self._depth and data.strip():
             tag, classes = self._tags[-1]
+            ancestor_classes = set().union(*(tag_classes for _tag, tag_classes in self._tags))
             # In current Takeout the time is direct text in this cell; response
             # content after <br> lives in nested p/h3/pre/li nodes.
             is_time_field = (tag == "div" and (("content-cell" in classes
                               and "mdl-typography--body-1" in classes)
                              or "header-cell" in classes))
             is_provider_field = tag == "div" and "content-cell" in classes and "mdl-typography--body-1" in classes
-            self._parts.append((data.strip(), is_time_field, is_provider_field))
+            # Google chrome is emitted inside header/caption containers.  The
+            # identical words in a normal nested body node are user/answer text.
+            is_chrome = bool({"header-cell", "mdl-typography--caption"}.intersection(ancestor_classes))
+            self._parts.append((data.strip(), is_time_field, is_provider_field, is_chrome))
 
 
 def _gemini_time(lines: list[str]) -> Optional[str]:
@@ -412,13 +417,15 @@ def _gemini_time(lines: list[str]) -> Optional[str]:
 
 
 def _gemini_visible_text(lines: list[str], marker: str, metadata_indexes: Optional[set[int]] = None,
-                         provider_indexes: Optional[set[int]] = None) -> str:
+                         provider_indexes: Optional[set[int]] = None,
+                         chrome_indexes: Optional[set[int]] = None) -> str:
     out = []
     marker_re = re.compile(rf"^{re.escape(marker)}(?:\s*[:：]\s*|\s*$)", re.I)
     metadata_indexes = metadata_indexes or set()
     provider_indexes = provider_indexes or set()
+    chrome_indexes = chrome_indexes or set()
     for index, line in enumerate(lines):
-        if index in metadata_indexes or _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
+        if index in metadata_indexes or index in chrome_indexes:
             continue
         line = marker_re.sub("", line).strip()
         if index in provider_indexes and re.match(rf"^{re.escape(marker)}\s+", line, re.I):
@@ -428,35 +435,32 @@ def _gemini_visible_text(lines: list[str], marker: str, metadata_indexes: Option
     return "\n".join(out).strip()
 
 
-def _gemini_answer_text(lines: list[str]) -> str:
-    out = []
-    for line in lines:
-        if _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
-            break
-        line = re.sub(r"^Gemini(?:\s*[:：]\s*|\s*$)", "", line, flags=re.I).strip()
-        if line and line != "Gemini Apps":
-            out.append(line)
-    return "\n".join(out).strip()
+def _gemini_answer_text(lines: list[str], metadata_indexes: Optional[set[int]] = None,
+                        provider_indexes: Optional[set[int]] = None,
+                        chrome_indexes: Optional[set[int]] = None) -> str:
+    return _gemini_visible_text(lines, "Gemini", metadata_indexes, provider_indexes, chrome_indexes)
 
 
-def _gemini_user_text(lines: list[str], provider_indexes: Optional[set[int]] = None) -> str:
+def _gemini_user_text(lines: list[str], provider_indexes: Optional[set[int]] = None,
+                      chrome_indexes: Optional[set[int]] = None) -> str:
     out = []
     attachments = False
     provider_indexes = provider_indexes or set()
+    chrome_indexes = chrome_indexes or set()
     for index, line in enumerate(lines):
         # The caller has already sliced away the one selected activity timestamp.
         # Date-like text inside a prompt is legitimate user content.
-        if _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
+        if index in chrome_indexes:
             continue
         if re.match(r"^Prompted(?:\s*[:：]\s*|\s*$)", line, re.I):
             line = re.sub(r"^Prompted(?:\s*[:：]\s*|\s*$)", "", line, flags=re.I)
         elif index in provider_indexes and re.match(r"^Prompted\s+", line, re.I):
             line = re.sub(r"^Prompted\s+", "", line, flags=re.I)
-        if re.match(r"^Attached\s+\d+\s+files?\.?", line, re.I):
+        if index in provider_indexes and re.match(r"^Attached\s+\d+\s+files?\.?", line, re.I):
             attachments = True
             continue
         if line and line != "-":
-            out.append(f"[附件: {line}]" if attachments else line)
+            out.append(f"[附件: {line}]" if attachments and index in provider_indexes else line)
     return "\n".join(out).strip()
 
 
@@ -474,7 +478,7 @@ def parse_gemini(path: Path) -> tuple:
         raise ImportError_(f"{target} 未找到可靠的 Gemini 活动容器（请改用手工整理）")
     activities = []
     pending = None
-    for lines, structural_time_indexes, provider_indexes in parser.blocks:
+    for lines, structural_time_indexes, provider_indexes, chrome_indexes in parser.blocks:
         is_prompt = any(re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
                         or (i in provider_indexes and re.match(r"^Prompted\s+", line, re.I))
                         for i, line in enumerate(lines))
@@ -497,14 +501,21 @@ def parse_gemini(path: Path) -> tuple:
             legacy_time = (_gemini_time([lines[legacy_timestamp_indexes[0]]])
                            if len(legacy_timestamp_indexes) == 1 else None)
             user_lines = lines[prompt_index:timestamp_index] if timestamp_index is not None else lines[prompt_index:]
-            text = _gemini_user_text(user_lines, {i - prompt_index for i in provider_indexes
-                                                   if prompt_index <= i < (timestamp_index or len(lines))})
+            end_index = timestamp_index if timestamp_index is not None else len(lines)
+            text = _gemini_user_text(
+                user_lines,
+                {i - prompt_index for i in provider_indexes if prompt_index <= i < end_index},
+                {i - prompt_index for i in chrome_indexes if prompt_index <= i < end_index})
             timestamp = _gemini_time([lines[timestamp_index]]) if timestamp_index is not None else legacy_time
             if not timestamp or not text:
                 raise ImportError_(f"{target} 存在无法可靠绑定时间或正文的 Prompted 活动（请改用手工整理）")
             activity = {"time": timestamp, "user": text, "answer": None}
             if timestamp_index is not None:
-                activity["answer"] = _gemini_answer_text(lines[timestamp_index + 1:])
+                answer_start = timestamp_index + 1
+                activity["answer"] = _gemini_answer_text(
+                    lines[answer_start:],
+                    provider_indexes={i - answer_start for i in provider_indexes if i >= answer_start},
+                    chrome_indexes={i - answer_start for i in chrome_indexes if i >= answer_start})
                 activities.append(activity)
                 pending = None
             else:
@@ -512,7 +523,7 @@ def parse_gemini(path: Path) -> tuple:
         elif is_legacy_answer:
             if pending is None:
                 raise ImportError_(f"{target} 存在未绑定 Prompted 的 Gemini 回答（请改用手工整理）")
-            answer = _gemini_visible_text(lines, "Gemini", structural_time_indexes, provider_indexes)
+            answer = _gemini_visible_text(lines, "Gemini", structural_time_indexes, provider_indexes, chrome_indexes)
             if answer:
                 pending["answer"] = answer
                 activities.append(pending)
@@ -580,32 +591,48 @@ def parse_deepseek(path: Path) -> tuple:
         if not isinstance(mapping, dict) or any(not isinstance(node, dict) for node in mapping.values()):
             skipped.append((conv.get("title") or conv.get("id") or "?", "会话 mapping 结构损坏"))
             continue
-        malformed = False
+        malformed_reason = None
         for node in mapping.values():
             msg = node.get("message")
             if msg is not None and not isinstance(msg, dict):
-                malformed = True
+                malformed_reason = "会话消息结构损坏"
                 break
             if isinstance(msg, dict):
                 fragments = msg.get("fragments")
                 if fragments is not None and not isinstance(fragments, list):
-                    malformed = True
+                    malformed_reason = "会话消息结构损坏"
                     break
                 if isinstance(fragments, list):
                     for fragment in fragments:
                         if not isinstance(fragment, dict):
-                            malformed = True
+                            malformed_reason = "会话消息结构损坏"
                             break
-                        if fragment.get("type") == "FILE":
+                        ftype = fragment.get("type")
+                        if not isinstance(ftype, str):
+                            malformed_reason = "会话片段 type 结构损坏"
+                            break
+                        if ftype in ("REQUEST", "RESPONSE", "THINK"):
+                            content = fragment.get("content")
+                            if content is not None and not isinstance(content, str):
+                                malformed_reason = f"会话片段 {ftype} content 不是字符串"
+                                break
+                        if ftype == "FILE":
                             files = fragment.get("files")
                             if files is not None and (not isinstance(files, list)
                                                       or any(not isinstance(item, dict) for item in files)):
-                                malformed = True
+                                malformed_reason = "附件元数据结构损坏"
                                 break
-                if malformed:
+                            for item in files or []:
+                                value = item.get("file_name") or item.get("file_id")
+                                if not isinstance(value, (str, int, float)):
+                                    malformed_reason = "附件元数据结构损坏"
+                                    break
+                        if malformed_reason:
+                            break
+                if malformed_reason:
                     break
-        if malformed:
-            skipped.append((conv.get("title") or conv.get("id") or "?", "会话消息结构损坏"))
+        if malformed_reason:
+            skipped.append((conv.get("title") or conv.get("id") or "?", malformed_reason))
             continue
         try:
             paths = _root_to_leaf_paths(mapping)
@@ -626,7 +653,8 @@ def parse_deepseek(path: Path) -> tuple:
                     if not isinstance(fr, dict):
                         continue
                     ftype = fr.get("type")
-                    content = str(fr.get("content") or "").strip()
+                    content = fr.get("content")
+                    content = content.strip() if isinstance(content, str) else ""
                     if ftype == "REQUEST":
                         role = "user"
                         if content:
@@ -647,14 +675,14 @@ def parse_deepseek(path: Path) -> tuple:
                             if isinstance(value, (str, int, float)):
                                 text_parts.append(f"[附件: {value}]")
                             else:
-                                skipped.append((str(conv.get("id") or nid), "内部内容已排除：附件元数据结构损坏"))
+                                skipped.append((str(conv.get("id") or nid), "附件元数据结构损坏"))
                     elif ftype in ("SEARCH", "TOOL_SEARCH", "TOOL_OPEN"):
                         if (nid, fragment_index) not in counted_fragments:
                             tool_count += 1
                             counted_fragments.add((nid, fragment_index))
                     else:
                         if (nid, fragment_index) not in counted_fragments:
-                            skipped.append((conv.get("title") or nid, f"内部内容已排除：未识别片段 {ftype or '?'}"))
+                            skipped.append((conv.get("title") or nid, f"未识别 DeepSeek 片段 {ftype or '?'}"))
                             counted_fragments.add((nid, fragment_index))
                 # Tool-only nodes retain their graph position but never become body text.
                 if role is not None and text_parts:
@@ -687,9 +715,10 @@ _CODEX_ENVELOPE_TAGS = (
     "external_codex_apps_writing_block_edits_part_2_of_3",
     "external_codex_apps_writing_block_edits_part_3_of_3",
 )
-_CODEX_ENVELOPE_RE = [re.compile(rf"^\s*<{tag}\b[^>]*>.*?</{tag}>\s*", re.I | re.S)
-                      for tag in _CODEX_ENVELOPE_TAGS]
-_IMAGE_TAG_RE = re.compile(r"<image(?=[\s/>])[^>]*>.*?</image\s*>|<image(?=[\s/>])[^>]*>", re.S)
+_CODEX_ENVELOPE_RE = {tag: re.compile(rf"^\s*<{tag}\b[^>]*>(.*?)</{tag}>\s*", re.I | re.S)
+                      for tag in _CODEX_ENVELOPE_TAGS}
+_CODEX_IMAGE_PLACEHOLDER_RE = re.compile(
+    r"<image\b(?=[^>]*\bname\s*=\s*\[Image\s+#\d+\])[^>]*>(?:.*?</image\s*>)?", re.S)
 _CODEX_AGENTS_RE = re.compile(
     r"^\s*#\s*AGENTS\.md instructions[^\n]*\n\s*<INSTRUCTIONS\b[^>]*>.*?</INSTRUCTIONS>\s*",
     re.I | re.S)
@@ -707,14 +736,16 @@ def _clean_codex_user(text: str, events: Optional[list[str]] = None) -> str:
         text, agents_removed = _CODEX_AGENTS_RE.subn("", text)
         if agents_removed and events is not None:
             events.append("内部内容已排除：Codex AGENTS 包装")
-        for pat in _CODEX_ENVELOPE_RE:
-            text, removed = pat.subn("", text)
-            if removed and events is not None:
-                events.append("内部内容已排除：Codex 系统包装")
+        for tag, pat in _CODEX_ENVELOPE_RE.items():
+            match = pat.match(text)
+            if match and _is_known_codex_envelope(tag, match.group(1)):
+                text = text[match.end():]
+                if events is not None:
+                    events.append("内部内容已排除：Codex 系统包装")
         if text == before:
             break
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-    if (re.match(r"^<(?:environment_context|recommended_plugins|heartbeat|in-app-browser-context|skills_instructions|plugins_instructions|apps_instructions|permissions_instructions)\b", first, re.I)
+    if (_is_incomplete_codex_envelope(text)
             or re.match(r"^#\s*AGENTS\.md instructions\b", first, re.I)):
         if events is not None:
             events.append("内部内容已排除：Codex 残留未闭合系统包装")
@@ -723,8 +754,64 @@ def _clean_codex_user(text: str, events: Optional[list[str]] = None) -> str:
         if events is not None:
             events.append("内部内容已排除：Codex 前置文件或浏览器上下文")
         return ""
-    text = _IMAGE_TAG_RE.sub("[图片]", text)
+    text = _CODEX_IMAGE_PLACEHOLDER_RE.sub("[图片]", text)
     return text.strip()
+
+
+def _is_known_codex_envelope(tag: str, body: str) -> bool:
+    """Require a provider-specific payload signature, never tag name alone."""
+    lowered = body.lower()
+    if tag == "environment_context":
+        return _codex_system_field_count(body) >= 2
+    return _has_codex_envelope_signature(tag, lowered)
+
+
+_CODEX_SYSTEM_FIELDS = {
+    "cwd", "shell", "current_date", "timezone", "filesystem", "file_system",
+    "permission_profile", "workspace_roots", "approval_policy", "sandbox_mode", "network_access",
+}
+
+
+def _codex_system_field_count(body: str) -> int:
+    found = {name.lower() for name in re.findall(r"<([\w-]+)\b", body)
+             if name.lower() in _CODEX_SYSTEM_FIELDS}
+    return len(found)
+
+
+def _has_codex_envelope_signature(tag: str, lowered_body: str) -> bool:
+    """Known non-XML payload markers also identify incomplete injected envelopes."""
+    if tag == "recommended_plugins":
+        return "available but not installed" in lowered_body or "plugin_id" in lowered_body
+    if tag == "skills_instructions":
+        return "## skills" in lowered_body
+    if tag == "plugins_instructions":
+        return "## plugins" in lowered_body
+    if tag == "apps_instructions":
+        return "apps (connectors)" in lowered_body
+    if tag == "permissions_instructions":
+        return "permission_profile" in lowered_body or "permissions" in lowered_body
+    if tag == "in-app-browser-context":
+        return "browser" in lowered_body or "ref_id" in lowered_body
+    if tag == "heartbeat":
+        return all(marker in lowered_body for marker in ("automation_id", "current_time_iso", "instructions"))
+    if tag.startswith("external_codex_apps_writing_block_edits_part_"):
+        markers = ("block", "edit", "writing")
+        return (all(marker in lowered_body for marker in markers)
+                and ("part_2" not in tag or "mcp" in lowered_body))
+    return False
+
+
+def _is_incomplete_codex_envelope(text: str) -> bool:
+    """Fail closed only for a leading, schema-proven wrapper lacking its closer."""
+    match = re.match(r"^\s*<([\w-]+)\b[^>]*>(.*)$", text, re.I | re.S)
+    if not match or match.group(1).lower() not in _CODEX_ENVELOPE_TAGS:
+        return False
+    tag, body = match.group(1).lower(), match.group(2)
+    if re.search(rf"</{re.escape(tag)}\s*>", body, re.I):
+        return False
+    if tag == "environment_context":
+        return _codex_system_field_count(body) >= 2
+    return _has_codex_envelope_signature(tag, body.lower())
 
 
 def _is_known_codex_automation(text: str) -> bool:
@@ -745,11 +832,16 @@ def _codex_text_with_events(content, events: Optional[list[str]]) -> str:
             if events is not None:
                 events.append("未知内部记录告警：Codex 未识别内容块")
             continue
-        ctype = str(c.get("type") or "").lower()
+        raw_ctype = c.get("type")
+        ctype = raw_ctype.lower() if isinstance(raw_ctype, str) else ""
         if ctype in ("input_text", "output_text"):
-            if c.get("text"):
-                parts.append(str(c["text"]))
-        elif "image" in ctype:
+            if "text" in c:
+                if not isinstance(c["text"], str):
+                    if events is not None:
+                        events.append(f"内容块结构损坏：Codex {ctype} text 不是字符串")
+                elif c["text"]:
+                    parts.append(c["text"])
+        elif ctype in ("input_image", "output_image", "image"):
             parts.append("[图片]")
         elif events is not None:
             events.append(f"未知内部记录告警：Codex 未识别内容块 {ctype or '?'}")
@@ -879,8 +971,11 @@ def _claude_content_text(content, events: Optional[list[str]]) -> tuple[str, boo
             continue
         block_type = str(block.get("type") or "")
         if block_type == "text":
-            text = str(block.get("text") or "")
-            if text:
+            text = block.get("text")
+            if not isinstance(text, str):
+                if events is not None:
+                    events.append("内容块结构损坏：Claude text 内容块 text 不是字符串")
+            elif text:
                 parts.append(text)
         elif block_type == "image":
             # Never stringify source/base64 fields from a local image block.

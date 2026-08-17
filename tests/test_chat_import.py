@@ -148,8 +148,10 @@ class ParserTests(unittest.TestCase):
             p.write_text(json.dumps([{"id": "x", "mapping": {"n": {"parent": None, "children": [], "message": {
                 "fragments": [{"type": "REQUEST", "content": "q"}, {"type": "FILE", "files": [{"file_name": {"secret": 1}}]}]}}}}]), encoding="utf-8")
             convs, skipped, _total = ic.parse_deepseek(p)
-            self.assertNotIn("secret", "\n".join(m[3] for m in convs[0][4]))
-            self.assertTrue(any("附件元数据结构损坏" in reason for _ref, reason in skipped))
+            self.assertEqual(convs, [])
+            reasons = [reason for _ref, reason in skipped if "附件元数据结构损坏" in reason]
+            self.assertTrue(reasons)
+            self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
 
     def test_deepseek_branches_are_separate_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -175,8 +177,10 @@ class ParserTests(unittest.TestCase):
         self.assertIsNotNone(convs)
         _src, cid, title, _exp, msgs = convs[0]
         self.assertEqual(cid, "fake-session-001")
-        self.assertIn("帮我写个 Python 脚本", title)
-        self.assertNotIn("environment_context", msgs[0][3])
+        self.assertTrue(title)
+        self.assertIn("帮我写个 Python 脚本", msgs[0][3])
+        # A one-field fixture is not a proven system envelope and must survive.
+        self.assertIn("environment_context", msgs[0][3])
         self.assertEqual(msgs[0][2], "u1")  # 真实 payload id 保留
 
     def test_codex_adversarial_cleaning(self) -> None:
@@ -184,7 +188,7 @@ class ParserTests(unittest.TestCase):
             p = Path(td) / "rollout-x.jsonl"
             lines = [
                 '{"timestamp": "2026-08-01T10:00:00Z", "type": "session_meta", "payload": {"id": "adv"}}',
-                '{"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u1", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for /\n<INSTRUCTIONS>平台规则</INSTRUCTIONS><environment_context><cwd>/x</cwd></environment_context>"}]}}',
+                '{"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u1", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for /\n<INSTRUCTIONS>平台规则</INSTRUCTIONS><environment_context><cwd>/x</cwd><shell>zsh</shell></environment_context>"}]}}',
                 '{"timestamp": "2026-08-01T10:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u2", "content": [{"type": "input_text", "text": "Automation: Personal context daily observer\n<root>...</root>"}]}}',
                 '{"timestamp": "2026-08-01T10:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u3", "content": [{"type": "input_text", "text": "<image name=[Image #1] path=/tmp/a.png></image>真的用户提问"}]}}',
                 '{"timestamp": "2026-08-01T10:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "id": "a1", "content": [{"type": "output_text", "text": "回答"}]}}',
@@ -237,12 +241,16 @@ class ParserTests(unittest.TestCase):
         self.assertIn("<string>keep</string>", cleaned)
         self.assertIn("<prompt>keep too</prompt>", cleaned)
         self.assertIn("<environment_context><cwd>/private</cwd></environment_context>", cleaned)
+        self.assertEqual(ic._clean_codex_user("<environment_context>literal code</environment_context>"),
+                         "<environment_context>literal code</environment_context>")
+        self.assertEqual(ic._clean_codex_user("<image>literal code</image>"),
+                         "<image>literal code</image>")
 
     def test_codex_repeated_leading_wrappers_and_prefix_records_are_dropped(self) -> None:
-        nested = ("<environment_context><cwd>/one</cwd></environment_context>\n"
+        nested = ("<environment_context><cwd>/one</cwd><shell>zsh</shell></environment_context>\n"
                   "# AGENTS.md instructions for /\n<INSTRUCTIONS>internal</INSTRUCTIONS>\n"
-                  "<recommended_plugins><plugin>x</plugin></recommended_plugins>\n"
-                  "<environment_context><cwd>/two</cwd></environment_context>")
+                  "<recommended_plugins>available but not installed</recommended_plugins>\n"
+                  "<environment_context><cwd>/two</cwd><shell>zsh</shell></environment_context>")
         self.assertEqual(ic._clean_codex_user(nested), "")
         self.assertEqual(ic._clean_codex_user("# Files mentioned by the user:\n<path>/x</path>"), "")
         self.assertEqual(ic._clean_codex_user("# In app browser:\n<url>http://x</url>"), "")
@@ -251,7 +259,7 @@ class ParserTests(unittest.TestCase):
 
     def test_codex_unclosed_known_wrappers_are_excluded_but_generic_xml_survives(self) -> None:
         events = []
-        self.assertEqual(ic._clean_codex_user("<environment_context><cwd>/private", events), "")
+        self.assertEqual(ic._clean_codex_user("<environment_context><cwd>/private</cwd>\n<shell>zsh", events), "")
         self.assertEqual(ic._clean_codex_user("# AGENTS.md instructions for /\n<INSTRUCTIONS>partial", events), "")
         self.assertTrue(any("残留未闭合" in event for event in events))
         self.assertEqual(ic._clean_codex_user("<name>Ada</name><path>/safe</path>"),
@@ -260,6 +268,37 @@ class ParserTests(unittest.TestCase):
                          "<imagery>keep</imagery><image-processing>x</image-processing>")
         self.assertIn("<environment_context>example</environment_context>",
                       ic._clean_codex_user("真实代码\n<environment_context>example</environment_context>"))
+
+    def test_codex_real_wrapper_signatures_and_exact_image_placeholders(self) -> None:
+        self.assertEqual(ic._clean_codex_user(
+            "<environment_context><cwd>/work</cwd><shell>zsh</shell></environment_context>visible"), "visible")
+        self.assertEqual(ic._clean_codex_user(
+            "<environment_context><cwd>literal</cwd></environment_context>"),
+            "<environment_context><cwd>literal</cwd></environment_context>")
+        self.assertEqual(ic._clean_codex_user(
+            "<heartbeat><automation_id>x</automation_id><current_time_iso>now</current_time_iso>instructions</heartbeat>visible"),
+            "visible")
+        self.assertEqual(ic._clean_codex_user("<heartbeat>literal heartbeat</heartbeat>"),
+                         "<heartbeat>literal heartbeat</heartbeat>")
+        for tag, body in (
+            ("external_codex_apps_writing_block_edits_part_1_of_3", "block edit writing"),
+            ("external_codex_apps_writing_block_edits_part_2_of_3", "block edit writing mcp"),
+            ("external_codex_apps_writing_block_edits_part_3_of_3", "block edit writing"),
+        ):
+            with self.subTest(tag=tag):
+                self.assertEqual(ic._clean_codex_user(f"<{tag}>{body}</{tag}>visible"), "visible")
+        self.assertEqual(ic._clean_codex_user("<image name=[Image #7]></image>visible"), "[图片]visible")
+        self.assertEqual(ic._clean_codex_user("<image name=[Image #8] path=/tmp/x></image>visible"), "[图片]visible")
+        self.assertEqual(ic._clean_codex_user('<image name="demo" path="x">literal</image>'),
+                         '<image name="demo" path="x">literal</image>')
+
+    def test_codex_multiline_incomplete_wrappers_require_schema_evidence(self) -> None:
+        events = []
+        self.assertEqual(ic._clean_codex_user(
+            "<environment_context>\n<cwd>/work</cwd>\n<shell>zsh", events), "")
+        self.assertTrue(any("残留未闭合" in event for event in events))
+        self.assertEqual(ic._clean_codex_user("<environment_context>\n<cwd>literal</cwd>"),
+                         "<environment_context>\n<cwd>literal</cwd>")
 
     def test_malformed_json_boundaries_are_reported_without_attribute_errors(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -289,6 +328,43 @@ class ParserTests(unittest.TestCase):
             self.assertTrue(any("结构损坏" in event for event in events))
             with self.assertRaises(ic.ImportError_):
                 ic._classify_local_file(codex, "auto")
+
+    def test_visible_text_types_and_deepseek_fragment_failures_are_not_rendered(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            deepseek = root / "conversations.json"
+            def export(fragments):
+                return [{"id": "bad", "mapping": {
+                    "root": {"parent": None, "children": ["m"]},
+                    "m": {"parent": "root", "children": [], "message": {"fragments": fragments}},
+                }}]
+            for fragments, needle in (
+                ([{"type": "REQUEST", "content": {"private": "object"}}], "REQUEST content 不是字符串"),
+                ([{"type": "FILE", "files": [{"file_name": {"private": "object"}}]}], "附件元数据结构损坏"),
+                ([{"type": "FUTURE_FRAGMENT", "content": "opaque"}], "未识别 DeepSeek 片段"),
+            ):
+                deepseek.write_text(json.dumps(export(fragments), ensure_ascii=False), encoding="utf-8")
+                convs, skipped, _total = ic.parse_deepseek(deepseek)
+                self.assertEqual(convs, [])
+                reasons = [reason for _ref, reason in skipped if needle in reason]
+                self.assertTrue(reasons)
+                self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
+
+            codex = root / "rollout-types.jsonl"
+            codex.write_text(json.dumps({"type": "response_item", "payload": {
+                "type": "message", "role": "user", "content": [{"type": "input_text", "text": {"no": "render"}}],
+            }}), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_codex(codex, events))
+            self.assertTrue(any("text 不是字符串" in event and not ic._is_expected_exclusion(event) for event in events))
+
+            claude = root / "claude-types.jsonl"
+            claude.write_text(json.dumps({"type": "user", "message": {
+                "role": "user", "content": [{"type": "text", "text": ["no", "render"]}],
+            }}), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_claude(claude, events))
+            self.assertTrue(any("text 不是字符串" in event and not ic._is_expected_exclusion(event) for event in events))
 
     def test_claude_non_string_type_is_structured_failure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -560,13 +636,31 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(msgs[0][3], "actual prompt")
             self.assertEqual(msgs[1][3], "Gemini can help with this.")
 
+    def test_gemini_removes_chrome_only_from_proven_metadata_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'>
+<div class='header-cell'>Gemini Apps</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：<span>Gemini Apps in prompt</span></div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>https://gemini.google.com/ordinary-user-url</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div class='mdl-typography--caption'>Gemini Apps</div><div class='mdl-typography--caption'>https://gemini.google.com/activity</div>
+<div><p>Gemini Apps in answer</p><p>https://gemini.google.com/ordinary-answer-url</p></div>
+</div>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            user, answer = (m[3] for m in convs[0][4])
+            self.assertIn("Gemini Apps in prompt", user)
+            self.assertIn("ordinary-user-url", user)
+            self.assertEqual(answer, "Gemini Apps in answer\nhttps://gemini.google.com/ordinary-answer-url")
+
     def test_gemini_splits_prompted_activities_with_stable_ids(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "我的活动记录.html"
             p.write_text("""<html><body>
 <div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:00</div><div>Prompted：重复问题</div></div>
 <div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:01</div><div>Gemini：第一个回答</div></div>
-<div class='outer-cell'><div class='header-cell'>2026年8月2日 下午3:00</div><div>Prompted：重复问题</div><div>Attached 1 files.</div><div>a.pdf</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月2日 下午3:00</div><div>Prompted：重复问题</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Attached 1 files.</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>a.pdf</div></div>
 <div class='outer-cell'><div class='header-cell'>2026年8月2日 下午3:01</div><div>Gemini：第二个回答</div></div>
 </body></html>""", encoding="utf-8")
             convs, _skipped, total = ic.parse_gemini(p)
@@ -1026,6 +1120,23 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                 self.assertIn("会话条目结构损坏", r.stdout)
                 self.assertNotIn("Traceback", r.stderr)
+
+    def test_deepseek_malformed_fragment_is_partial_cli_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            export = Path(td) / "conversations.json"
+            export.write_text(json.dumps([
+                {"id": "valid", "mapping": {"m": {"parent": None, "children": [], "message": {
+                    "fragments": [{"type": "REQUEST", "content": "visible"}],
+                }}}},
+                {"id": "bad", "mapping": {"m": {"parent": None, "children": [], "message": {
+                    "fragments": [{"type": "FILE", "files": [{"file_id": {"opaque": 1}}]}],
+                }}}},
+            ], ensure_ascii=False), encoding="utf-8")
+            r = run_import("--source", "deepseek", "--path", str(export),
+                           "--root", str(Path(td) / "out"), "--yes")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("原始 2 个会话，输出 1 个会话", r.stdout)
+        self.assertIn("附件元数据结构损坏", r.stdout)
 
     def test_local_dry_run_fixture_roots(self) -> None:
         codex_root = FIXTURE / "codex" / "sessions"
