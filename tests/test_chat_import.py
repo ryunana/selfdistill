@@ -93,6 +93,11 @@ class ParserTests(unittest.TestCase):
             self.assertTrue(any(reason.startswith("内部内容已排除：ChatGPT reasoning")
                                 for _ref, reason in skipped))
 
+    def test_gemini_container_classes_are_exact_tokens_and_allow_valueless_attrs(self) -> None:
+        parser = ic._GeminiActivityExtractor()
+        parser.feed("<div class='not-outer-cell'><div>忽略</div></div><div class><div>也忽略</div></div>")
+        self.assertEqual(parser.blocks, [])
+
     def test_chatgpt_empty_conversation_reported(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "conversations-000.json"
@@ -183,6 +188,35 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(len(texts), 1)  # u1 被清空、u2 Automation 被丢弃，仅 u3 保留
             self.assertIn("真的用户提问", texts[0])
             self.assertIn("[图片]", texts[0])
+
+    def test_codex_structured_images_are_safe_visible_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rollout-images.jsonl"
+            p.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "session_meta", "payload": {"id": "images"}},
+                {"timestamp": "2026-08-01T10:00:00Z", "type": "response_item", "payload": {
+                    "type": "message", "role": "user", "content": [
+                        {"type": "input_image", "image_url": "https://private.example/image", "data": "secret"},
+                    ]}},
+                {"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {
+                    "type": "message", "role": "assistant", "content": [
+                        {"type": "output_image", "source": {"data": "secret-output"}},
+                    ]}},
+            ]), encoding="utf-8")
+            events = []
+            convs = ic.parse_codex(p, events)
+            self.assertEqual([m[3] for m in convs[0][4]], ["[图片]", "[图片]"])
+            self.assertNotIn("private.example", "\n".join(m[3] for m in convs[0][4]))
+            self.assertFalse(events)
+
+    def test_codex_empty_known_text_block_is_ignored_without_warning(self) -> None:
+        events = []
+        text = ic._codex_text_with_events([
+            {"type": "input_text", "text": "可见文字"},
+            {"type": "output_text", "text": ""},
+        ], events)
+        self.assertEqual(text, "可见文字")
+        self.assertEqual(events, [])
 
     def test_codex_preserves_user_xml_but_removes_known_envelopes(self) -> None:
         user = ("<name>Ada</name><path>/safe</path><string>keep</string><prompt>keep too</prompt>\n"
@@ -567,6 +601,31 @@ class CliTests(unittest.TestCase):
             ic.write_conversation(first, {}, unowned)
         self.assertEqual(unowned_path.read_text(encoding="utf-8"), original)
 
+    def test_same_batch_conversation_key_is_rejected_without_overwriting_first(self) -> None:
+        out = self._tmp()
+        first = ("chatgpt", "same", "first", "2026-08-01", [("user", None, "u1", "first")])
+        second = ("chatgpt", "same", "second", "2026-08-01", [("user", None, "u2", "second")])
+        total, outputs, new, updated, dup, skipped = ic.import_convs(
+            [first, second], [], 2, {}, out, dry_run=False)
+        self.assertEqual((total, outputs, new, updated, dup), (2, 1, 1, 0, 0))
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("批次内重复会话键", skipped[0][1])
+        self.assertIn("first", (out / "chatgpt-same.md").read_text(encoding="utf-8"))
+        self.assertNotIn("second", (out / "chatgpt-same.md").read_text(encoding="utf-8"))
+
+    def test_output_symlink_is_rejected_without_touching_target(self) -> None:
+        out = self._tmp()
+        out.mkdir()
+        sentinel = out.parent / "sentinel.md"
+        sentinel.write_text("outside", encoding="utf-8")
+        os.chmod(sentinel, 0o644)
+        (out / "chatgpt-link.md").symlink_to(sentinel)
+        conv = ("chatgpt", "link", "title", "2026-08-01", [("user", None, "u", "inside")])
+        with self.assertRaisesRegex(ic.ImportError_, "符号链接"):
+            ic.write_conversation(conv, {}, out)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+        self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+
     def test_collision_cli_reports_only_successful_outputs_and_partial_exit(self) -> None:
         def conversation(cid: str, mid: str) -> dict:
             return {"id": cid, "title": cid, "current_node": mid, "mapping": {
@@ -585,6 +644,35 @@ class CliTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("原始 2 个会话，输出 1 个会话 → 新导入 1", r.stdout)
         self.assertIn("解析/写入失败 1", r.stdout)
+
+    def test_same_key_cli_is_partial_and_reverse_markers_report_cleanly(self) -> None:
+        def conversation(cid: str, mid: str, text: str) -> dict:
+            return {"id": cid, "title": cid, "current_node": mid, "mapping": {
+                "root": {"parent": None, "children": [mid]},
+                mid: {"parent": "root", "children": [], "message": {
+                    "id": mid, "author": {"role": "user"}, "create_time": 1,
+                    "content": {"parts": [text]},
+                }},
+            }}
+        with tempfile.TemporaryDirectory() as td:
+            export = Path(td) / "conversations-000.json"
+            out = Path(td) / "out"
+            export.write_text(json.dumps([conversation("same", "m1", "first"),
+                                          conversation("same", "m2", "second")]), encoding="utf-8")
+            r = run_import("--source", "chatgpt", "--path", str(export), "--root", str(out), "--yes")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("批次内重复会话键", r.stdout)
+            self.assertIn("first", (out / "chatgpt-same.md").read_text(encoding="utf-8"))
+
+            reverse = out / "chatgpt-reverse.md"
+            reverse.write_text("<!-- source: chatgpt -->\n<!-- conversation_id: reverse -->\n"
+                               "<!-- distill-messages:end -->\nold\n<!-- distill-messages:begin -->\n",
+                               encoding="utf-8")
+            export.write_text(json.dumps([conversation("reverse", "m3", "replacement")]), encoding="utf-8")
+            reverse_run = run_import("--source", "chatgpt", "--path", str(export), "--root", str(out), "--yes")
+            self.assertEqual(reverse_run.returncode, 1, reverse_run.stdout + reverse_run.stderr)
+            self.assertIn("消息标记顺序损坏", reverse_run.stdout)
+            self.assertNotIn("Traceback", reverse_run.stderr)
 
     def test_duplicate_restores_permissions_but_dry_run_is_write_free(self) -> None:
         out = self._tmp()
@@ -851,6 +939,22 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(len(bad), 1)
                 self.assertIn("文件名冲突", bad[0][1])
         self.assertFalse(out.exists())
+
+    def test_local_batch_duplicate_key_is_rejected_before_second_write(self) -> None:
+        out = self._tmp()
+        first = ("codex", "same", "first", "2026-08-01", [("user", None, "u1", "first")])
+        second = ("codex", "same", "second", "2026-08-01", [("user", None, "u2", "second")])
+        found = [
+            ("codex", "one", "first", None, None, 1, "one.jsonl"),
+            ("codex", "two", "second", None, None, 1, "two.jsonl"),
+        ]
+        args = unittest.mock.Mock(yes=True, dry_run=False)
+        with unittest.mock.patch.object(ic, "parse_codex", side_effect=[[first], [second]]):
+            total, outputs, new, updated, dup, bad = ic.run_local(found, args, {}, out)
+        self.assertEqual((total, outputs, new, updated, dup), (2, 1, 1, 0, 0))
+        self.assertEqual(len(bad), 1)
+        self.assertIn("批次内重复会话键", bad[0][1])
+        self.assertIn("first", (out / "codex-same.md").read_text(encoding="utf-8"))
 
     def test_local_report_separates_expected_exclusions_from_bad_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as td:

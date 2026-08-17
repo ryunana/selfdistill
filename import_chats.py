@@ -337,15 +337,16 @@ class _GeminiActivityExtractor(HTMLParser):
         self._tags: list[tuple[str, set[str]]] = []
 
     def handle_starttag(self, tag, attrs):
-        classes = " ".join(value for key, value in attrs if key == "class")
-        if self._depth == 0 and tag == "div" and ("outer-cell" in classes or "activity-container" in classes):
+        class_tokens = {token for key, value in attrs if key == "class" and value
+                        for token in str(value).split()}
+        if self._depth == 0 and tag == "div" and class_tokens.intersection({"outer-cell", "activity-container"}):
             self._depth = 1
             self._parts = []
-            self._tags = [(tag, set(classes.split()))]
+            self._tags = [(tag, class_tokens)]
             return
         if self._depth and tag not in self._VOID:
             self._depth += 1
-            self._tags.append((tag, set(classes.split())))
+            self._tags.append((tag, class_tokens))
 
     def handle_endtag(self, tag):
         if not self._depth:
@@ -654,12 +655,24 @@ def _is_known_codex_automation(text: str) -> bool:
 
 
 def _codex_text(content) -> str:
+    return _codex_text_with_events(content, None)
+
+
+def _codex_text_with_events(content, events: Optional[list[str]]) -> str:
     parts = []
     for c in content or []:
         if not isinstance(c, dict):
+            if events is not None:
+                events.append("未知内部记录告警：Codex 未识别内容块")
             continue
-        if c.get("type") in ("input_text", "output_text") and c.get("text"):
-            parts.append(str(c["text"]))
+        ctype = str(c.get("type") or "").lower()
+        if ctype in ("input_text", "output_text"):
+            if c.get("text"):
+                parts.append(str(c["text"]))
+        elif "image" in ctype:
+            parts.append("[图片]")
+        elif events is not None:
+            events.append(f"未知内部记录告警：Codex 未识别内容块 {ctype or '?'}")
     return "\n".join(parts).strip()
 
 
@@ -710,7 +723,7 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
             role = str(payload.get("role") or "").lower()
             if role not in ("user", "assistant"):
                 continue
-            text = _codex_text(payload.get("content"))
+            text = _codex_text_with_events(payload.get("content"), events)
             if role == "user":
                 text = _clean_codex_user(text, events)
             if not text:
@@ -934,6 +947,8 @@ def _managed_parts(content: str, path: Path) -> tuple[str, str, str]:
     end = "<!-- distill-messages:end -->"
     if content.count(begin) != 1 or content.count(end) != 1:
         raise ImportError_(f"现有 Markdown 的消息标记损坏，拒绝覆盖：{path}")
+    if content.find(begin) > content.find(end):
+        raise ImportError_(f"现有 Markdown 的消息标记顺序损坏，拒绝覆盖：{path}")
     before, rest = content.split(begin, 1)
     body, after = rest.split(end, 1)
     return before, body.strip("\n"), after
@@ -983,6 +998,8 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
     if len(ids) != len(set(ids)):
         raise ImportError_(f"会话 {key} 出现重复 message_id，拒绝写入")
     path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
+    if path.is_symlink():
+        raise ImportError_(f"输出目标是符号链接，拒绝写入：{path}")
     _assert_no_filename_collision(source, cid, key, path, imported)
     desired = _render_messages(msgs)
     result = "new"
@@ -1134,9 +1151,15 @@ def run_source(source: str, path_arg: Optional[str], args, imported: dict,
 def import_convs(convs: list, skipped: list, total: int, imported: dict,
                  out_dir: Path, dry_run: bool) -> tuple:
     new = updated = dup = 0
+    seen_keys: set[str] = set()
     if total == 0 and not convs and not skipped:
         skipped.append(("导出文件", SKIP_EMPTY))
     for conv in convs:
+        key = f"{conv[0]}:{conv[1]}"
+        if key in seen_keys:
+            skipped.append((conv[1], f"写入失败：批次内重复会话键 {key}"))
+            continue
+        seen_keys.add(key)
         try:
             result = write_conversation(conv, imported, out_dir, dry_run)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
@@ -1176,6 +1199,7 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
             return (len(found), 0, 0, 0, 0, discovery_failures)
     new = updated = dup = 0
     bad = list(discovery_failures)
+    seen_keys: set[str] = set()
     for source, sid, title, first_t, last_t, size, path in found:
         events: list[str] = []
         try:
@@ -1189,6 +1213,11 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
             if not events:
                 bad.append((sid, SKIP_EMPTY))
             continue
+        key = f"{convs[0][0]}:{convs[0][1]}"
+        if key in seen_keys:
+            bad.append((sid, f"写入失败：批次内重复会话键 {key}"))
+            continue
+        seen_keys.add(key)
         try:
             result = write_conversation(convs[0], imported, out_dir, args.dry_run)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
