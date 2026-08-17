@@ -4,15 +4,16 @@ selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 A
 
 ## 格式约定
 
-一个文件 = 一段对话（一个会话，或一个来源导出的片段）。文件头用 HTML 注释标注来源，正文每条消息用 `**role**（时间）：` 开头。
+一个文件 = 一段对话（一个会话，或一个来源导出的片段）。文件头用 HTML 注释标注来源，正文每条消息用 `**role**（时间）：` 开头。尽量保留原始 ID；没有原始 ID 时，用相对文件路径 + 消息序号定位，绝不根据上下文补造时间或 ID。
 
 ```markdown
 # <来源> · <会话标题>
 
 <!-- source: chatgpt -->
+<!-- conversation_id: fictional-conversation-001 -->
 <!-- exported_at: 2026-08-13 [SIMULATED] 示例元数据 -->
 
-**user**（示例时间）：
+**user**（示例时间；message_id: fictional-message-001）：
 <!-- [SIMULATED] 以下为虚构示例，不代表真实个人身份。 -->
 [SIMULATED] 我是一名虚构示例用户，想做一档关于电影的播客。
 
@@ -27,6 +28,10 @@ selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 A
 | role | 只用 `user` / `assistant` 两个，中性，不做额外分类 |
 | 时间 | 尽量带，格式 `YYYY-MM-DD HH:MM`；缺时间标 `（未知）` |
 | 来源 | 文件头 `<!-- source: xxx -->`，用简短标识 |
+| conversation_id | 推荐在文件头写原始会话 ID；没有则不编造，后续用相对文件路径定位 |
+| exported_at | 推荐在文件头记录导出时间；未知则写 `未知` |
+| message_id | 推荐每条消息保留原始消息 ID；没有则按文件中的消息序号（如 `#17`）定位 |
+| 授权附件 | 写明来源、所有者和本次授权范围；未获授权的附件不要放入输入 |
 
 来源标识建议：`chatgpt` / `gemini` / `deepseek` / `codex` / `claude` / `chatmemo`，可自定。
 
@@ -53,4 +58,4 @@ selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 A
 
 这些来源目前需要按上面的统一格式手工或半手工整理；仓库不提供自动导出脚本。
 
-整理完成后，把文件放进 `input/` 目录（该目录已被 `.gitignore` 忽略，不会提交到仓库）。
+整理完成后，把文件放进 `input/` 目录（该目录已被 `.gitignore` 忽略，不会提交到仓库）。这是手工/半手工整理格式，不代表仓库会自动导入、调用模型或读取任何平台账户。首次处理时，把统一 Markdown、现有 `canonical/` 和所需授权附件交给 AI，并使用 `prompts/distill.md`；它应先报告完整阅读边界，再提出候选，不直接写正式档案。
