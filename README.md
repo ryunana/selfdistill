@@ -35,7 +35,7 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
 ### 使用者要做的
 
 1. 在你要蒸馏的 AI 工具里按对应入口导出聊天记录；各来源的导出入口和文件说明见 [`docs/intake.md`](docs/intake.md)。
-2. 把导出的文件和这个仓库交给你正在使用的 AI（例如 Codex、Claude Code 或 Hermes），然后直接告诉它：
+2. 把导出的文件和这个仓库交给你正在使用的 AI（例如 Codex、Claude Code、Hermes 或 DeepSeek Harness），然后直接告诉它：
 
    ```text
    请接手这个 selfdistill 项目：
@@ -43,7 +43,7 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
    2. 按 prompts/distill.md 从头读完材料，先报告阅读边界，再提出 L1–L4 候选；
    3. L3 和个人/敏感/高风险/冲突内容逐条给我确认；只有可见、可撤回的低风险通用规则可免逐条确认；
    4. 不要直接写 canonical/、L4 或简历。等我处理候选后，先展示完整 aggregate diff，再等我明确确认才写入；
-   5. 写入后再运行 python3 build.py；如果要写回 Codex 或 Hermes，先展示 diff，得到我明确确认后再执行 install.py。
+   5. 写入后再运行 python3 build.py；如果要写回 Codex、Hermes 或 DeepSeek Harness（DSH），先展示 diff，得到我明确确认后再执行 install.py。
    ```
 
 3. 查看 AI 给出的候选，逐条确认、修改或拒绝。需要写回 AI 工具时，再确认一次 diff。
@@ -53,8 +53,8 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
 1. 阅读 `docs/intake.md`，把使用者导出的记录整理成统一 Markdown，放进已被 Git 忽略的 `input/`。
 2. 按 `prompts/distill.md` 提炼 L1–L4 候选；先展示来源和候选，不直接改正式档案。
 3. 只在用户已处理候选、并明确确认了最终 aggregate diff 后，才增量写入 `canonical/`（结构参考 `templates/`，仓库里的「张三」是虚构样例）。
-4. 运行 `python3 build.py`，生成 `dist/index.html`、L1–L4 报告以及 `dist/codex/`、`dist/hermes/`。
-5. 如使用者要写回，运行 `python3 install.py --target codex`（或 `hermes`）：先展示 diff，等使用者明确确认后再增量写入，不覆盖无关内容。
+4. 运行 `python3 build.py`，生成 `dist/index.html`、L1–L4 报告以及 `dist/codex/`、`dist/hermes/`、`dist/dsh/`。
+5. 如使用者要写回，运行 `python3 install.py --target codex`（或 `hermes` / `dsh`）：先展示 diff，等使用者明确确认后再增量写入，不覆盖无关内容。
 
 ## 首次蒸馏：从完整历史建立 L1–L4
 
@@ -73,6 +73,38 @@ L3 始终逐条确认；L1/L2/L4 中描述个人的内容，以及敏感、高�
 | Gemini 网页导出（Takeout · 我的活动 · Gemini Apps） | 📄 有导入说明 |
 | DeepSeek 网页导出 | 📄 有导入说明 |
 
+## DeepSeek Harness 支持
+
+selfdistill 可以直接把蒸馏出的档案写回本机 DeepSeek Harness（DSH），也可以作为 DSH 插件安装，让 DSH 里的 AI 掌握完整蒸馏工作流。
+
+### 写回 DSH（--target dsh）
+
+```bash
+python3 build.py                # 生成 dist/（含 dist/dsh/）
+python3 install.py --target dsh # 写入 $DSH_HOME（默认 ~/.dsh），先展示 diff、确认后写入
+```
+
+写回内容按隐私分级：
+
+| 内容 | 写入位置 | 加载时机 |
+|------|----------|----------|
+| L1 协作契约 | `system-prompt.persona`（`$DSH_HOME/cordis.patch.yml`） | 每个新对话常驻（短、非敏感） |
+| L2 决策逻辑 | `~/.dsh/skills/selfstill-decision-logic/SKILL.md` | 按需加载 |
+| L3 个人事实 | `~/.dsh/skills/selfstill-user-profile/SKILL.md` | 按需加载；私密 L3 默认不写（`--include-private` 才包含） |
+| L4 领域打法 | `~/.dsh/skills/selfstill-<领域>/SKILL.md` | 按需加载 |
+
+### 安装 selfstill 插件（可选）
+
+让 DSH 的 agent 直接掌握 selfstill 蒸馏工作流（整理 → 提炼 → 逐条确认 → 构建 → 写回）：
+
+```bash
+dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
+# 重启 dsh web 生效
+```
+
+- 插件包为零依赖 bundle（`selfdistill-dsh`），安装后 agent 的 skill 目录里出现 `selfdistill`；
+- 发布到 npm 后可直接 `dsh plugin --profile web add selfdistill-dsh`。
+
 ## 重新导入一批新对话
 
 如果新增的是一批完整聊天记录，继续把整理后的内容追加到 `input/`，重跑 `prompts/distill.md`，人工确认候选后再运行 `python3 build.py`（确实需要写回时再确认 `install.py`）。这个流程适合批量导入新的聊天记录，不需要任何调度器。
@@ -86,7 +118,7 @@ L3 始终逐条确认；L1/L2/L4 中描述个人的内容，以及敏感、高�
    > 每次运行 `audit` 都会重建并替换整个 `reports/latest/`。如果里面已有尚未处理的 `discoveries.md` 或 `candidates/`，请先完成审阅，或把需要保留的文件另存到 `reports/latest/` 之外。
 3. 把 [`prompts/rediscovery.md`](prompts/rediscovery.md) 交给你当前选择的 AI，并要求它从头到尾阅读 `reports/latest/evidence.md`。要求它只把发现和待确认候选写回 `reports/`，不要修改 `canonical/`。
 4. 运行 `python3 distill_audit.py verify reports/latest`，确认来源没有漂移、候选格式正确、所有 evidence 引用真实存在，再逐条接受、拒绝或标记为未知。`verify` 不判断候选结论是否正确，也不能证明 AI 已完整阅读全部证据，最终仍需人工审阅；`accepted` 只表示你接受了候选，不表示它已经写入 `canonical/`。
-5. 由你人工把确认后的内容更新到 `canonical/`，然后继续使用原有 `python3 build.py`；确实需要写回 Codex 或 Hermes 时，再展示 diff 并明确确认 `install.py --target ...`。
+5. 由你人工把确认后的内容更新到 `canonical/`，然后继续使用原有 `python3 build.py`；确实需要写回 Codex、Hermes 或 DSH 时，再展示 diff 并明确确认 `install.py --target ...`。
 
 `inbox/*.json`、`reports/`、`input/` 和 `dist/` 都是本机数据或生成物，默认被 Git 忽略；仓库只保留 inbox 说明和 `input/.gitkeep`。数据默认留在本机，但如果你把 `evidence.md` 交给云端 AI，仍须遵守该模型供应商的数据政策。不要把真实聊天、候选或报告提交到公开仓库。
 
