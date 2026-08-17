@@ -4,12 +4,20 @@
 用法：
     python3 install.py --target codex     # 装到 ~/.codex
     python3 install.py --target hermes    # 装到 ~/.hermes
+    python3 install.py --target dsh       # 装到 $DSH_HOME（默认 ~/.dsh）
     python3 install.py --target codex --yes   # 跳过确认直接写（慎用）
 
 只做三件事：目标文件不存在则新建；存在则替换 distill 标记块之间的内容；无标记则追加一个标记块。
+
+DSH 目标（--target dsh）：
+- persona（L1 协作契约）合并进 $DSH_HOME/cordis.patch.yml 的 system-prompt.persona；
+- L2/L3/L4 写成 $DSH_HOME/skills/<name>/SKILL.md（frontmatter 在顶部，按需加载）；
+- 目标 skill 文件已存在但无 distill 标记（非 selfstill 管理）时拒绝覆盖。
 """
 import argparse
 import difflib
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +27,22 @@ END = "<!-- distill:end -->"
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 HOME = Path.home()
+
+# DSH 配置根：尊重 $DSH_HOME，缺省 ~/.dsh
+DSH_HOME = Path(os.environ["DSH_HOME"]) if os.environ.get("DSH_HOME") else HOME / ".dsh"
+
+# DSH web profile 默认 persona 开场白（来自 dsh-web-app bundle patch，实测 rc.7）。
+# 若你的 DSH 已自定义 persona，可用 SELFSTILL_DSH_PERSONA_OPENER 覆盖本常量。
+DEFAULT_PERSONA_OPENER = (
+    os.environ.get("SELFSTILL_DSH_PERSONA_OPENER")
+    or "You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}."
+)
+
+SYSTEM_PROMPT_ID = "- id: system-prompt"
+
+
+class InstallError(Exception):
+    """安装过程的可预期错误：主流程捕获后打印并退出非零。"""
 
 
 def merge(existing: str, incoming: str) -> str:
@@ -32,6 +56,89 @@ def merge(existing: str, incoming: str) -> str:
         suffix = ("\n\n" + suffix.lstrip("\n")) if suffix.strip() else ""
         return existing[:b] + incoming.rstrip() + "\n" + suffix
     return existing.rstrip() + "\n\n" + incoming.rstrip() + "\n"
+
+
+def has_system_prompt_row(text: str) -> bool:
+    """当前 home patch 是否已有 system-prompt 行（行首必须顶格）。"""
+    return re.search(r"(?m)^- id: system-prompt\s*$", text) is not None
+
+
+def build_persona_block(persona_md: str) -> str:
+    """把 persona.md（含 distill 标记）组合成 cordis.patch.yml 的一行 patch。
+
+    persona 是字面量块标量（|），保留 Markdown 换行；distill 标记包裹开场白 + L1，
+    重复安装时只替换标记之间的内容。内容统一缩进 6 空格。
+    """
+    opener = DEFAULT_PERSONA_OPENER
+    if "{{" in persona_md or "}}" in persona_md:
+        print("警告：L1 内容包含 {{ 或 }}，DSH persona 模板无转义，渲染时可能报错，请改写。",
+              file=sys.stderr)
+    body_lines = [line if not line else f"      {line}" for line in persona_md.rstrip().splitlines()]
+    block = (f"{SYSTEM_PROMPT_ID}\n"
+             f"  config:\n"
+             f"    persona: |-\n"
+             f"      {opener}\n"
+             f"\n"
+             f"{chr(10).join(body_lines)}\n")
+    return block
+
+
+def indent_block(text: str, indent: str = "      ") -> str:
+    """给非空行加统一缩进（块标量正文）。"""
+    return "\n".join(line if not line else indent + line for line in text.rstrip().splitlines())
+
+
+def merge_persona_patch(existing: str, persona_md: str) -> str:
+    """把 persona 合并进 $DSH_HOME/cordis.patch.yml。
+
+    - 文件不存在 / 空白 / 空列表（[]）：写入整行；
+    - 已有 system-prompt 行且 persona 区域含 distill 标记：只替换该行内标记之间的内容
+      （行头、开场白、其他 patch 行保持字节不变）；
+    - 已有 system-prompt 行但无标记（用户自定义）：拒绝（fail loud）；
+    - 其他内容：在列表末尾追加该行。
+    """
+    incoming = build_persona_block(persona_md)
+    stripped = existing.strip()
+    if not stripped or stripped == "[]":
+        return incoming
+    if stripped.startswith("[") and stripped != "[]":
+        raise InstallError("已有 cordis.patch.yml 使用 flow 风格列表（[...]），"
+                           "无法安全追加；请手动加入 system-prompt 行后重试。")
+    if has_system_prompt_row(existing):
+        lines = existing.splitlines(keepends=True)
+        start = next(i for i, line in enumerate(lines) if re.match(r"- id: system-prompt\s*$", line))
+        end = len(lines)
+        for i in range(start + 1, len(lines)):
+            if re.match(r"- id:", lines[i]):
+                end = i
+                break
+        section = "".join(lines[start:end])
+        b = section.find(BEGIN)
+        if b == -1:
+            raise InstallError("已有 system-prompt 自定义 persona 且无 distill 标记，"
+                               "拒绝覆盖；请手动合并或移除该行后重试。")
+        e = section.find(END)
+        if e == -1 or e <= b:
+            raise InstallError("system-prompt persona 的 distill 标记不完整，拒绝覆盖；请手动修复后重试。")
+        inner = persona_md.split(BEGIN, 1)[1].rsplit(END, 1)[0].strip("\n")
+        region = f"{BEGIN}\n{indent_block(inner)}\n      {END}"
+        new_section = section[:b] + region + section[e + len(END):]
+        return "".join(lines[:start]) + new_section + "".join(lines[end:])
+    return existing.rstrip() + "\n\n" + incoming.rstrip() + "\n"
+
+
+def merge_skill(existing: str, incoming: str) -> str:
+    """DSH skill 文件合并：整文件替换，以 distill 标记为所有权判定。
+
+    - 不存在：直接写入（incoming 自带 frontmatter + 标记）；
+    - 已有且含 distill 标记（selfstill 管理）：整文件替换（frontmatter 更新可传播）；
+    - 已有但无标记（其他工具/用户文件）：拒绝覆盖。
+    """
+    if not existing:
+        return incoming
+    if BEGIN not in existing:
+        raise InstallError(f"已有目标文件但不含 distill 标记（非 selfstill 管理），拒绝覆盖。")
+    return incoming
 
 
 def reject_symlink(path: Path, label: str) -> None:
@@ -74,8 +181,12 @@ def collect_plans(target: str) -> list:
         if f.is_dir():
             continue
         rel = f.relative_to(src_root)
-        dest = HOME / f".{target}" / rel
-        target_root = HOME / f".{target}"
+        if target == "dsh":
+            target_root = DSH_HOME
+            dest = DSH_HOME / "cordis.patch.yml" if rel.as_posix() == "persona.md" else DSH_HOME / rel
+        else:
+            target_root = HOME / f".{target}"
+            dest = target_root / rel
         safe_target_path(target_root, dest)
         try:
             incoming = f.read_text(encoding="utf-8")
@@ -90,24 +201,33 @@ def collect_plans(target: str) -> list:
         except UnicodeError:
             print(f"错误：已有目标文件不是 UTF-8 文本：{dest}", file=sys.stderr)
             sys.exit(1)
-        new_content = merge(existing, incoming)
-        plans.append((dest, existing, new_content))
+        if target == "dsh" and rel.as_posix() == "persona.md":
+            new_content = merge_persona_patch(existing, incoming)
+        elif target == "dsh":
+            new_content = merge_skill(existing, incoming)
+        else:
+            new_content = merge(existing, incoming)
+        plans.append((target_root, dest, existing, new_content))
     return plans
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", required=True, choices=["codex", "hermes"])
+    ap.add_argument("--target", required=True, choices=["codex", "hermes", "dsh"])
     ap.add_argument("--yes", action="store_true", help="跳过确认，直接写入")
     args = ap.parse_args()
 
-    plans = collect_plans(args.target)
-    changed = [(d, e, n) for d, e, n in plans if e != n]
+    try:
+        plans = collect_plans(args.target)
+    except InstallError as e:
+        print(f"错误：{e}", file=sys.stderr)
+        return 1
+    changed = [(r, d, e, n) for r, d, e, n in plans if e != n]
     if not changed:
         print("所有目标文件均已是最新，无需变更。")
         return 0
 
-    for dest, existing, new_content in changed:
+    for _root, dest, existing, new_content in changed:
         print(f"\n=== {dest} ===")
         if not existing:
             print("  [新建]")
@@ -130,8 +250,8 @@ def main() -> int:
             print("已取消。")
             return 0
 
-    for dest, existing, new_content in changed:
-        safe_target_path(HOME / f".{args.target}", dest)
+    for root, dest, _existing, new_content in changed:
+        safe_target_path(root, dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(new_content, encoding="utf-8")
         print(f"已写入 {dest}")

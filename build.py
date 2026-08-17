@@ -596,6 +596,18 @@ def skill_frontmatter(domain_id: str, description: str) -> str:
     return f'---\nname: {domain_id}\ndescription: "{description}"\n---\n\n'
 
 
+DSH_L2_DESCRIPTION = ("用户 L2 决策逻辑：取舍原则、优先级与红线。"
+                      "任务涉及权衡、排序、风险判断或红线时按需加载。")
+DSH_L3_DESCRIPTION = ("用户 L3 个人事实档案：身份、经历、偏好。"
+                      "任务需要了解用户背景、身份或偏好时按需加载。")
+
+
+def dsh_skill_content(skill_name: str, description: str, text: str) -> str:
+    """DSH skill 内容：frontmatter 必须在文件顶部，distill 标记在正文内作所有权标签。"""
+    return (f"---\nname: {skill_name}\ndescription: \"{description}\"\n---\n\n"
+            f"{BEGIN}\n{text.rstrip()}\n{END}\n")
+
+
 def build_targets(l1: str, l2: str, l3: str, domains: list) -> None:
     codex = DIST / "codex"
     (codex / "profile").mkdir(parents=True, exist_ok=True)
@@ -621,6 +633,24 @@ def build_targets(l1: str, l2: str, l3: str, domains: list) -> None:
         (hermes / "skills" / fid).mkdir(parents=True, exist_ok=True)
         (hermes / "skills" / fid / "SKILL.md").write_text(
             wrap(skill_frontmatter(fid, desc) + text), encoding="utf-8")
+
+    # DSH：persona 只放 L1（协作契约，非敏感）；L2/L3/L4 为按需加载的 skill。
+    dsh = DIST / "dsh"
+    dsh.mkdir(parents=True, exist_ok=True)
+    (dsh / "persona.md").write_text(wrap(l1), encoding="utf-8")
+    (dsh / "skills").mkdir(parents=True, exist_ok=True)
+    for skill_name, description, text in [
+        ("selfstill-decision-logic", DSH_L2_DESCRIPTION, l2),
+        ("selfstill-user-profile", DSH_L3_DESCRIPTION, l3),
+    ]:
+        (dsh / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
+        (dsh / "skills" / skill_name / "SKILL.md").write_text(
+            dsh_skill_content(skill_name, description, text), encoding="utf-8")
+    for fid, text, desc in domains:
+        skill_name = f"selfstill-{fid}"
+        (dsh / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
+        (dsh / "skills" / skill_name / "SKILL.md").write_text(
+            dsh_skill_content(skill_name, desc, text), encoding="utf-8")
 
 
 # ---------- main ----------
@@ -705,7 +735,7 @@ def main() -> int:
         (DIST / f"{slug}-raw.html").write_text(build_raw(title, text, assets), encoding="utf-8")
 
     build_targets(l1, l2, l3, domains)
-    print(f"完成：dist/index.html + 内页/原始报告 + codex/ + hermes/（L4 领域 {len(domains)} 个）。")
+    print(f"完成：dist/index.html + 内页/原始报告 + codex/ + hermes/ + dsh/（L4 领域 {len(domains)} 个）。")
     return 0
 
 
