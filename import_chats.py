@@ -113,6 +113,24 @@ def _normalize_message_text(text: str) -> str:
     return str(text).replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _safe_scalar(value) -> Optional[str]:
+    """Accept only normal scalar metadata; nested values never become text."""
+    if isinstance(value, str):
+        return value if value else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
+def _safe_title(value, default: str = "未命名会话") -> str:
+    return _safe_scalar(value) or default
+
+
+def _record_fallback_id(source: str, file_name: str, record_index: int) -> str:
+    return f"{source}-fp-" + hashlib.sha1(
+        f"{source}|{file_name}|{record_index}".encode("utf-8")).hexdigest()[:12]
+
+
 def _stable_id(role: str, t: Optional[str], text: str) -> str:
     """稳定消息 id：无真实 id 时用内容指纹，保证增量去重不随行号漂移。"""
     return "fp-" + hashlib.sha1(
@@ -122,12 +140,12 @@ def _stable_id(role: str, t: Optional[str], text: str) -> str:
 def _occurrence_id(role: str, raw_timestamp, line_ordinal: int, text: str) -> str:
     """Fallback for append-only local JSONL records that have no native message ID."""
     return "fp-" + hashlib.sha1(
-        f"{role}|{raw_timestamp or ''}|{line_ordinal}|{_normalize_message_text(text)}".encode("utf-8")
+        f"{role}|{_safe_scalar(raw_timestamp) or ''}|{line_ordinal}|{_normalize_message_text(text)}".encode("utf-8")
     ).hexdigest()[:12]
 
 
 def _make_conversation(source: str, cid: str, title: str, msgs: list) -> tuple:
-    title = " ".join(str(title).split())
+    title = " ".join(_safe_title(title).split())
     times = [t for _r, t, _m, _x in msgs if t]
     exported_at = times[-1][:10] if times else today_str()
     return (source, cid, title, exported_at, msgs)
@@ -155,26 +173,26 @@ def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
             continue
         parent = str(parent)
         if parent not in nodes:
-            raise ImportError_(f"会话 mapping 存在断链：{nid} 的 parent {parent} 不存在")
+            raise ImportError_("会话 mapping 存在断链")
         children[parent].append(nid)
     for nid, node in nodes.items():
         declared = node.get("children") or []
         if not isinstance(declared, list):
-            raise ImportError_(f"会话 mapping 的 children 不是列表：{nid}")
+            raise ImportError_("会话 mapping 的 children 不是列表")
         for child in declared:
             child = str(child)
             if child not in nodes:
-                raise ImportError_(f"会话 mapping 存在断链：{nid} 的 child {child} 不存在")
+                raise ImportError_("会话 mapping 存在断链")
             if str(nodes[child].get("parent")) != nid:
-                raise ImportError_(f"会话 mapping 的 parent/children 不一致：{nid} → {child}")
+                raise ImportError_("会话 mapping 的 parent/children 不一致")
         if set(map(str, declared)) != set(children[nid]):
-            raise ImportError_(f"会话 mapping 的 parent/children 不一致：{nid}")
+            raise ImportError_("会话 mapping 的 parent/children 不一致")
     for start in nodes:
         seen = set()
         nid: Optional[str] = start
         while nid is not None:
             if nid in seen:
-                raise ImportError_(f"会话 mapping 存在循环：{nid}")
+                raise ImportError_("会话 mapping 存在循环")
             seen.add(nid)
             parent = nodes[nid].get("parent")
             nid = str(parent) if parent is not None else None
@@ -188,7 +206,7 @@ def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
         nid: Optional[str] = leaf
         while nid is not None:
             if nid in seen:
-                raise ImportError_(f"会话 mapping 存在循环：{nid}")
+                raise ImportError_("会话 mapping 存在循环")
             seen.add(nid)
             chain.append(nid)
             parent = nodes[nid].get("parent")
@@ -207,12 +225,12 @@ def _path_to_node(mapping: dict, node_id: str) -> list[str]:
     nid: Optional[str] = node_id
     while nid is not None:
         if nid in seen:
-            raise ImportError_(f"会话 mapping 存在循环：{nid}")
+            raise ImportError_("会话 mapping 存在循环")
         seen.add(nid)
         chain.append(nid)
         parent = nodes[nid].get("parent")
         if parent is not None and str(parent) not in nodes:
-            raise ImportError_(f"会话 mapping 存在断链：{nid} 的 parent {parent} 不存在")
+            raise ImportError_("会话 mapping 存在断链")
         nid = str(parent) if parent is not None else None
     return list(reversed(chain))
 
@@ -260,16 +278,16 @@ def parse_chatgpt(path: Path) -> tuple:
             skipped.append((f.name, SKIP_BAD))
             continue
         total += len(data or [])
-        for conv in data or []:
+        for record_index, conv in enumerate(data or [], 1):
             if not isinstance(conv, dict):
                 skipped.append((f.name, "会话条目结构损坏"))
                 continue
             mapping = conv.get("mapping") or {}
             if not isinstance(mapping, dict):
-                skipped.append((conv.get("title") or conv.get("id") or f.name, "会话 mapping 不是对象"))
+                skipped.append(("—", "会话 mapping 不是对象"))
                 continue
             if any(not isinstance(node, dict) for node in mapping.values()):
-                skipped.append((conv.get("title") or conv.get("id") or f.name, "会话 mapping 节点不是对象"))
+                skipped.append(("—", "会话 mapping 节点不是对象"))
                 continue
             malformed = False
             for node in mapping.values():
@@ -290,7 +308,7 @@ def parse_chatgpt(path: Path) -> tuple:
                 if malformed:
                     break
             if malformed:
-                skipped.append((conv.get("title") or conv.get("id") or f.name, "会话消息结构不是对象"))
+                skipped.append(("—", "会话消息结构不是对象"))
                 continue
             current = conv.get("current_node")
             has_valid_current = bool(current and str(current) in mapping)
@@ -298,7 +316,7 @@ def parse_chatgpt(path: Path) -> tuple:
                 paths = ([_path_to_node(mapping, str(current))]
                          if has_valid_current else _root_to_leaf_paths(mapping))
             except ImportError_ as e:
-                skipped.append((conv.get("title") or conv.get("id") or "?", str(e)))
+                skipped.append(("—", "会话 mapping 结构损坏"))
                 continue
             valid = []
             for node_path in paths:
@@ -320,22 +338,22 @@ def parse_chatgpt(path: Path) -> tuple:
                     unknown_parts += unknown
                     if not text:
                         continue
-                    mid = str(msg.get("id") or nid) or _stable_id(role, None, text)
+                    mid = _safe_scalar(msg.get("id")) or nid or _stable_id(role, None, text)
                     msgs.append((role, fmt_time(msg.get("create_time")), mid, text))
                 if msgs:
                     valid.append((node_path, msgs, unknown_parts, excluded_internal))
             if not valid:
                 if excluded_internal:
-                    skipped.append((conv.get("title") or conv.get("id") or "?",
+                    skipped.append(("—",
                                     f"内部内容已排除：ChatGPT reasoning {excluded_internal} 个"))
                 else:
-                    skipped.append((conv.get("title") or conv.get("id") or "?", SKIP_EMPTY))
+                    skipped.append(("—", SKIP_EMPTY))
                 continue
             branching = not has_valid_current and len(valid) > 1
             for index, (node_path, msgs, unknown_parts, excluded_internal) in enumerate(valid, 1):
-                base = str(conv.get("id") or f.stem)
+                base = _safe_scalar(conv.get("id")) or _record_fallback_id("chatgpt", f.name, record_index)
                 cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
-                title = str(conv.get("title") or "未命名会话")
+                title = _safe_title(conv.get("title"))
                 if branching:
                     title += f"（分支 {index}）"
                 convs.append(_make_conversation("chatgpt", cid, title, msgs))
@@ -585,13 +603,13 @@ def parse_deepseek(path: Path) -> tuple:
     skipped = []
     tool_count = 0
     total = len(data or [])
-    for conv in data or []:
+    for record_index, conv in enumerate(data or [], 1):
         if not isinstance(conv, dict):
             skipped.append(("conversations.json", "会话条目结构损坏"))
             continue
         mapping = conv.get("mapping") or {}
         if not isinstance(mapping, dict) or any(not isinstance(node, dict) for node in mapping.values()):
-            skipped.append((conv.get("title") or conv.get("id") or "?", "会话 mapping 结构损坏"))
+            skipped.append(("—", "会话 mapping 结构损坏"))
             continue
         malformed_reason = None
         for node in mapping.values():
@@ -639,12 +657,12 @@ def parse_deepseek(path: Path) -> tuple:
                 if malformed_reason:
                     break
         if malformed_reason:
-            skipped.append((conv.get("title") or conv.get("id") or "?", malformed_reason))
+            skipped.append(("—", malformed_reason))
             continue
         try:
             paths = _root_to_leaf_paths(mapping)
         except ImportError_ as e:
-            skipped.append((conv.get("title") or conv.get("id") or "?", str(e)))
+            skipped.append(("—", "会话 mapping 结构损坏"))
             continue
         outputs = []
         counted_fragments: set[tuple[str, int]] = set()
@@ -674,7 +692,7 @@ def parse_deepseek(path: Path) -> tuple:
                         if _INCLUDE_THINKING and content:
                             text_parts.append("<!-- thinking -->\n" + content)
                         elif content and (nid, fragment_index) not in counted_fragments:
-                            skipped.append((str(conv.get("id") or nid), "内部内容已排除：THINK"))
+                            skipped.append(("—", "内部内容已排除：THINK"))
                             counted_fragments.add((nid, fragment_index))
                     elif ftype == "FILE":
                         for fi in fr.get("files") or []:
@@ -682,14 +700,14 @@ def parse_deepseek(path: Path) -> tuple:
                             if isinstance(value, (str, int, float)):
                                 text_parts.append(f"[附件: {value}]")
                             else:
-                                skipped.append((str(conv.get("id") or nid), "附件元数据结构损坏"))
+                                skipped.append(("—", "附件元数据结构损坏"))
                     elif ftype in ("SEARCH", "TOOL_SEARCH", "TOOL_OPEN"):
                         if (nid, fragment_index) not in counted_fragments:
                             tool_count += 1
                             counted_fragments.add((nid, fragment_index))
                     else:
                         if (nid, fragment_index) not in counted_fragments:
-                            skipped.append((conv.get("title") or nid, f"未识别 DeepSeek 片段 {ftype or '?'}"))
+                            skipped.append(("—", "未识别 DeepSeek 片段"))
                             counted_fragments.add((nid, fragment_index))
                 # Tool-only nodes retain their graph position but never become body text.
                 if role is not None and text_parts:
@@ -697,13 +715,13 @@ def parse_deepseek(path: Path) -> tuple:
             if msgs:
                 outputs.append((node_path, msgs))
         if not outputs:
-            skipped.append((conv.get("title") or conv.get("id") or "?", SKIP_EMPTY))
+            skipped.append(("—", SKIP_EMPTY))
             continue
         branching = len(outputs) > 1
         for index, (node_path, msgs) in enumerate(outputs, 1):
-            base = str(conv.get("id") or "unknown")
+            base = _safe_scalar(conv.get("id")) or _record_fallback_id("deepseek", "conversations.json", record_index)
             cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
-            title = str(conv.get("title") or "未命名会话")
+            title = _safe_title(conv.get("title"))
             if branching:
                 title += f"（分支 {index}）"
             convs.append(_make_conversation("deepseek", cid, title, msgs))
@@ -885,7 +903,7 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
     try:
         fh = path.open(encoding="utf-8")
     except OSError as e:
-        raise ImportError_(f"无法读取 {path}：{e}")
+        raise ImportError_("无法读取 Codex JSONL")
     try:
         with fh:
             for i, line in enumerate(fh, 1):
@@ -929,11 +947,11 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
                     text = _clean_codex_user(text, events)
                 if not text:
                     continue
-                mid = (str(payload.get("id") or "")
+                mid = (_safe_scalar(payload.get("id"))
                        or _occurrence_id(role, d.get("timestamp"), i, text))
                 msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
     except UnicodeDecodeError:
-        raise ImportError_(f"Codex JSONL UTF-8 解码失败：{path.name}")
+        raise ImportError_("Codex JSONL UTF-8 解码失败")
     if not msgs:
         return None
     title = _first_user_snippet(msgs) or path.stem
@@ -1004,7 +1022,7 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
     try:
         fh = path.open(encoding="utf-8")
     except OSError as e:
-        raise ImportError_(f"无法读取 {path}：{e}")
+        raise ImportError_("无法读取 Claude JSONL")
     try:
         with fh:
             for i, line in enumerate(fh, 1):
@@ -1073,11 +1091,11 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                     if content is not None and not content_handled and events is not None:
                         events.append("未知内部记录告警：Claude 未识别消息内容")
                     continue
-                mid = (str(d.get("uuid") or "")
+                mid = (_safe_scalar(d.get("uuid"))
                        or _occurrence_id(role, d.get("timestamp"), i, text))
                 msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
     except UnicodeDecodeError:
-        raise ImportError_(f"Claude JSONL UTF-8 解码失败：{path.name}")
+        raise ImportError_("Claude JSONL UTF-8 解码失败")
     if not msgs:
         return None
     title = _first_user_snippet(msgs) or path.stem
@@ -1123,7 +1141,7 @@ def imported_path(out_dir: Path) -> Path:
 
 def _assert_safe_output_root(out_dir: Path) -> None:
     if out_dir.is_symlink():
-        raise ImportError_(f"输出根目录是符号链接，拒绝访问：{out_dir}")
+        raise ImportError_("输出根目录是符号链接，拒绝访问")
     absolute = out_dir.absolute()
     trusted = [ROOT.absolute(), Path.cwd().absolute(), Path.home().absolute(),
                Path(tempfile.gettempdir()).absolute()]
@@ -1139,9 +1157,9 @@ def _assert_safe_output_root(out_dir: Path) -> None:
     for part in absolute.relative_to(base).parts:
         current /= part
         if current.is_symlink():
-            raise ImportError_(f"输出根目录祖先是符号链接，拒绝访问：{current}")
+            raise ImportError_("输出根目录祖先是符号链接，拒绝访问")
     if imported_path(out_dir).is_symlink():
-        raise ImportError_(f"状态文件是符号链接，拒绝访问：{imported_path(out_dir)}")
+        raise ImportError_("状态文件是符号链接，拒绝访问")
 
 
 def load_imported(out_dir: Path) -> dict:
@@ -1150,18 +1168,18 @@ def load_imported(out_dir: Path) -> dict:
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            raise ImportError_(f"状态文件损坏，未修改：{p}（请先恢复或移走该文件）：{e}")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            raise ImportError_("状态文件损坏或 UTF-8 解码失败，未修改")
         if not isinstance(data, dict):
-            raise ImportError_(f"状态文件结构损坏，未修改：{p}（期望 JSON 对象）")
+            raise ImportError_("状态文件结构损坏，未修改（期望 JSON 对象）")
         for key, entry in data.items():
             if not isinstance(key, str) or ":" not in key:
-                raise ImportError_(f"状态文件结构损坏，未修改：{p}（会话键无效）")
+                raise ImportError_("状态文件结构损坏，未修改（会话键无效）")
             state_source, state_cid = key.split(":", 1)
             if not state_source or not state_cid:
-                raise ImportError_(f"状态文件结构损坏，未修改：{p}（会话键无效）")
+                raise ImportError_("状态文件结构损坏，未修改（会话键无效）")
             if not isinstance(entry, dict):
-                raise ImportError_(f"状态文件结构损坏，未修改：{p}（会话 {key} 不是对象）")
+                raise ImportError_("状态文件结构损坏，未修改（会话记录不是对象）")
             path = entry.get("path")
             imported_at = entry.get("imported_at")
             title = entry.get("title")
@@ -1170,7 +1188,7 @@ def load_imported(out_dir: Path) -> dict:
                     or not isinstance(title, str) or not isinstance(message_ids, list)
                     or any(not isinstance(mid, str) or not mid for mid in message_ids)
                     or len(message_ids) != len(set(message_ids))):
-                raise ImportError_(f"状态文件结构损坏，未修改：{p}（会话 {key} 字段无效）")
+                raise ImportError_("状态文件结构损坏，未修改（会话字段无效）")
         return data
     return {}
 
@@ -1209,9 +1227,9 @@ def _managed_parts(content: str, path: Path) -> tuple[str, str, str]:
     begin = "<!-- distill-messages:begin -->"
     end = "<!-- distill-messages:end -->"
     if content.count(begin) != 1 or content.count(end) != 1:
-        raise ImportError_(f"现有 Markdown 的消息标记损坏，拒绝覆盖：{path}")
+        raise ImportError_("现有 Markdown 的消息标记损坏，拒绝覆盖")
     if content.find(begin) > content.find(end):
-        raise ImportError_(f"现有 Markdown 的消息标记顺序损坏，拒绝覆盖：{path}")
+        raise ImportError_("现有 Markdown 的消息标记顺序损坏，拒绝覆盖")
     before, rest = content.split(begin, 1)
     body, after = rest.split(end, 1)
     return before, body.strip("\n"), after
@@ -1234,16 +1252,16 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
     for other_key, entry in imported.items():
         if other_key != key and isinstance(entry, dict) and isinstance(entry.get("path"), str):
             if _same_path(entry["path"], path):
-                raise ImportError_(f"文件名冲突：{key} 与 {other_key} 都会写入 {path.name}")
+                raise ImportError_("文件名冲突：目标文件已被其他会话占用")
     if not path.exists():
         return
     content = path.read_text(encoding="utf-8")
     old_sources = re.findall(r"^<!-- source: (.*?) -->\s*$", content, re.MULTILINE)
     old_cids = re.findall(r"^<!-- conversation_id: (.*?) -->\s*$", content, re.MULTILINE)
     if len(old_sources) != 1 or len(old_cids) != 1:
-        raise ImportError_(f"文件名冲突：{key} 的现有目标缺少或重复所有权元数据")
+        raise ImportError_("文件名冲突：现有目标缺少或重复所有权元数据")
     if (old_sources[0], old_cids[0]) != (_markdown_metadata(source), _markdown_metadata(cid)):
-        raise ImportError_(f"文件名冲突：{key} 会覆盖现有会话 {old_sources[0]}:{old_cids[0]}")
+        raise ImportError_("文件名冲突：现有目标所有权不匹配")
 
 
 def _claim_dry_run_output(conv: tuple, imported: dict, out_dir: Path) -> None:
@@ -1260,10 +1278,10 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
     key = f"{source}:{cid}"
     ids = [m[2] for m in msgs]
     if len(ids) != len(set(ids)):
-        raise ImportError_(f"会话 {key} 出现重复 message_id，拒绝写入")
+        raise ImportError_("会话出现重复 message_id，拒绝写入")
     path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
     if path.is_symlink():
-        raise ImportError_(f"输出目标是符号链接，拒绝写入：{path}")
+        raise ImportError_("输出目标是符号链接，拒绝写入")
     _assert_no_filename_collision(source, cid, key, path, imported)
     desired = _render_messages(msgs)
     result = "new"
@@ -1354,7 +1372,7 @@ def _peek(source: str, path: Path) -> tuple:
                     if len(tail_lines) > 30:
                         tail_lines.pop(0)
     except UnicodeDecodeError:
-        raise ImportError_(f"本地 JSONL UTF-8 解码失败：{path.name}")
+        raise ImportError_("本地 JSONL UTF-8 解码失败")
     except OSError:
         pass
     for line in head_lines + tail_lines:
@@ -1440,13 +1458,14 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
     for conv in convs:
         key = f"{conv[0]}:{conv[1]}"
         if key in seen_keys:
-            skipped.append((conv[1], f"写入失败：批次内重复会话键 {key}"))
+            skipped.append(("—", "写入失败：批次内重复会话键"))
             continue
         seen_keys.add(key)
         try:
             result = write_conversation(conv, imported, out_dir, dry_run)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
-            skipped.append((conv[1], f"写入失败：{e}"))
+            detail = str(e) if isinstance(e, ImportError_) else "输出写入失败"
+            skipped.append(("—", f"写入失败：{detail}"))
             continue
         if dry_run:
             _claim_dry_run_output(conv, imported, out_dir)
@@ -1498,13 +1517,14 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
             continue
         key = f"{convs[0][0]}:{convs[0][1]}"
         if key in seen_keys:
-            bad.append((sid, f"写入失败：批次内重复会话键 {key}"))
+            bad.append(("—", "写入失败：批次内重复会话键"))
             continue
         seen_keys.add(key)
         try:
             result = write_conversation(convs[0], imported, out_dir, args.dry_run)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
-            bad.append((sid, f"写入失败：{e}"))
+            detail = str(e) if isinstance(e, ImportError_) else "输出写入失败"
+            bad.append(("—", f"写入失败：{detail}"))
             continue
         if args.dry_run:
             _claim_dry_run_output(convs[0], imported, out_dir)
@@ -1572,8 +1592,10 @@ def _classify_local_file(path: Path, forced: str) -> str:
                     return "codex"
                 if dtype in ("user", "assistant", "mode") or "message" in record:
                     return "claude"
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise ImportError_(f"无法识别本地 JSONL：{e}")
+    except UnicodeDecodeError:
+        raise ImportError_("无法识别本地 JSONL：UTF-8 解码失败")
+    except (OSError, json.JSONDecodeError):
+        raise ImportError_("无法识别本地 JSONL：读取或 JSON 结构损坏")
     raise ImportError_("无法自动识别本地 JSONL；请使用 --local-format codex 或 claude")
 
 
@@ -1597,7 +1619,7 @@ def discover_local_path(root: Path, since: Optional[str], excludes: tuple, force
             size = path.stat().st_size
             first_t, last_t, title = _peek(source, path)
         except (ImportError_, OSError) as e:
-            failures.append((path.name, str(e)))
+            failures.append(("—", str(e) if isinstance(e, ImportError_) else "本地会话读取失败"))
             continue
         if since and (last_t or first_t or "") < since:
             continue

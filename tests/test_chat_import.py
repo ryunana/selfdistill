@@ -450,6 +450,59 @@ class ParserTests(unittest.TestCase):
             self.assertNotIn("secret_key", title)
             self.assertNotIn("secret_value", title)
 
+    def test_nested_metadata_never_enters_parser_output_or_state(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            secret = "nested-metadata-secret"
+            chatgpt = root / "conversations-000.json"
+            chatgpt.write_text(json.dumps([{"id": {"secret": secret}, "title": [secret], "current_node": "n", "mapping": {
+                "n": {"parent": None, "children": [], "message": {"id": {"secret": secret},
+                    "author": {"role": "user"}, "content": {"parts": ["chatgpt visible"]}}},
+            }}]), encoding="utf-8")
+            cg_first, _skipped, _total = ic.parse_chatgpt(chatgpt)
+            cg_second, _skipped, _total = ic.parse_chatgpt(chatgpt)
+            self.assertEqual(cg_first[0][1], cg_second[0][1])
+            self.assertTrue(cg_first[0][1].startswith("chatgpt-fp-"))
+            self.assertEqual(cg_first[0][2], "未命名会话")
+            self.assertEqual(cg_first[0][4][0][2], "n")
+
+            deepseek = root / "conversations.json"
+            deepseek.write_text(json.dumps([{"id": [secret], "title": {"secret": secret}, "mapping": {
+                "n": {"parent": None, "children": [], "message": {"fragments": [
+                    {"type": "REQUEST", "content": "deepseek visible"},
+                ]}},
+            }}]), encoding="utf-8")
+            ds, _skipped, _total = ic.parse_deepseek(deepseek)
+            self.assertTrue(ds[0][1].startswith("deepseek-fp-"))
+            self.assertEqual(ds[0][2], "未命名会话")
+
+            codex = root / "rollout-codex.jsonl"
+            codex.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "session_meta", "payload": {"id": {"secret": secret}}},
+                {"type": "response_item", "timestamp": "2026-08-01T10:00:00Z", "payload": {
+                    "type": "message", "role": "user", "id": {"secret": secret},
+                    "content": [{"type": "input_text", "text": "codex visible"}],
+                }},
+            ]), encoding="utf-8")
+            cx = ic.parse_codex(codex)[0]
+            self.assertEqual(cx[1], "codex")
+            self.assertTrue(cx[4][0][2].startswith("fp-"))
+
+            claude = root / "claude.jsonl"
+            claude.write_text(json.dumps({"type": "user", "uuid": {"secret": secret}, "message": {
+                "role": "user", "content": "claude visible",
+            }}), encoding="utf-8")
+            cl = ic.parse_claude(claude)[0]
+            self.assertTrue(cl[4][0][2].startswith("fp-"))
+
+            out = root / "out"
+            imported = {}
+            for conv in (cg_first[0], ds[0], cx, cl):
+                self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+            rendered = "\n".join(path.read_text(encoding="utf-8") for path in out.glob("*.md"))
+            self.assertNotIn(secret, rendered)
+            self.assertNotIn(secret, json.dumps(imported, ensure_ascii=False))
+
     def test_claude_excludes_internal_records_not_marker_mentions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "c.jsonl"
@@ -1385,6 +1438,63 @@ class CliTests(unittest.TestCase):
         self.assertIn("结构损坏 ×2", report)
         self.assertNotIn("private-title-secret-123", report)
         self.assertNotIn("another-private-ref", report)
+
+    def test_collision_report_uses_generic_reason_without_secret_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            secret = "collision-secret"
+            first = ("chatgpt", f"{secret}/a", secret, "2026-08-01", [("user", None, "u1", "one")])
+            second = ("chatgpt", f"{secret}?a", secret, "2026-08-01", [("user", None, "u2", "two")])
+            result = ic.import_convs([first, second], [], 2, {}, out, dry_run=False)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(*result, source="chatgpt", dry_run=False)
+            report = stream.getvalue()
+            self.assertIn("文件名冲突：目标文件已被其他会话占用", report)
+            self.assertNotIn(secret, report)
+
+    def test_invalid_utf8_imported_state_fails_without_output_write(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            out.mkdir()
+            state = ic.imported_path(out)
+            state.write_bytes(b"\xff")
+            before = state.read_bytes()
+            r = run_import("--source", "chatgpt", "--path", str(FIXTURE / "chatgpt"),
+                           "--root", str(out), "--yes")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("状态文件损坏或 UTF-8 解码失败", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertEqual(state.read_bytes(), before)
+            self.assertFalse(list(out.glob("*.md")))
+
+    def test_aggregate_mapping_and_local_decode_reasons_hide_secret_values(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            secret_node = "secret-node-id"
+            export = root / "conversations-000.json"
+            export.write_text(json.dumps([{"id": "safe", "mapping": {
+                secret_node: {"parent": "secret-parent-id", "children": []},
+            }}]), encoding="utf-8")
+            convs, skipped, total = ic.parse_chatgpt(export)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(total, len(convs), 0, 0, 0, skipped, "chatgpt", False)
+            report = stream.getvalue()
+            self.assertIn("会话 mapping 结构损坏", report)
+            self.assertNotIn(secret_node, report)
+            self.assertNotIn("secret-parent-id", report)
+
+            bad_name = root / "secret-local-filename.jsonl"
+            bad_name.write_bytes(b"\xff")
+            found, failures = ic.discover_local_path(bad_name, None, (), "codex")
+            self.assertEqual(found, [])
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(0, 0, 0, 0, 0, failures, "local", True)
+            report = stream.getvalue()
+            self.assertIn("本地 JSONL UTF-8 解码失败", report)
+            self.assertNotIn("secret-local-filename", report)
 
 
 if __name__ == "__main__":
