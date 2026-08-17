@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import zipfile
 from datetime import datetime
 from html.parser import HTMLParser
@@ -58,6 +59,8 @@ _MONTHS = {m: i for i, m in enumerate(
 _EN_DATETIME = re.compile(
     r"([A-Za-z]{3})[a-z]*\s+(\d{1,2}),?\s+(\d{4})[,\s]+(\d{1,2}):(\d{2})\s*(AM|PM)", re.I)
 _TIME_LINE = re.compile(r"\b\d{4}年\d{1,2}月\d{1,2}日\s*[上午下午晚上]*\d{1,2}[:：点]\d{1,2}")
+_TIME_FIELD = re.compile(
+    r"^\s*\d{4}年\d{1,2}月\d{1,2}日\s*[上午下午晚上]*\d{1,2}[:：点]\d{1,2}(?:[:：]\d{1,2})?(?:\s*(?:CST|GMT[+-]\d+)?)?\s*$")
 
 
 def fmt_time(value) -> Optional[str]:
@@ -257,6 +260,9 @@ def parse_chatgpt(path: Path) -> tuple:
             continue
         total += len(data or [])
         for conv in data or []:
+            if not isinstance(conv, dict):
+                skipped.append((f.name, "会话条目结构损坏"))
+                continue
             mapping = conv.get("mapping") or {}
             current = conv.get("current_node")
             has_valid_current = bool(current and str(current) in mapping)
@@ -270,6 +276,7 @@ def parse_chatgpt(path: Path) -> tuple:
             for node_path in paths:
                 msgs = []
                 unknown_parts = 0
+                excluded_internal = 0
                 for nid in node_path:
                     node = mapping[nid]
                     msg = node.get("message") or {}
@@ -277,6 +284,10 @@ def parse_chatgpt(path: Path) -> tuple:
                     if role not in ("user", "assistant"):
                         continue
                     content = msg.get("content") or {}
+                    content_kind = str(content.get("content_type") or content.get("type") or "").lower()
+                    if content_kind in ("thoughts", "reasoning_recap", "reasoning"):
+                        excluded_internal += 1
+                        continue
                     text, unknown = _chatgpt_parts(content.get("parts"))
                     unknown_parts += unknown
                     if not text:
@@ -284,12 +295,16 @@ def parse_chatgpt(path: Path) -> tuple:
                     mid = str(msg.get("id") or nid) or _stable_id(role, None, text)
                     msgs.append((role, fmt_time(msg.get("create_time")), mid, text))
                 if msgs:
-                    valid.append((node_path, msgs, unknown_parts))
+                    valid.append((node_path, msgs, unknown_parts, excluded_internal))
             if not valid:
-                skipped.append((conv.get("title") or conv.get("id") or "?", SKIP_EMPTY))
+                if excluded_internal:
+                    skipped.append((conv.get("title") or conv.get("id") or "?",
+                                    f"内部内容已排除：ChatGPT reasoning {excluded_internal} 个"))
+                else:
+                    skipped.append((conv.get("title") or conv.get("id") or "?", SKIP_EMPTY))
                 continue
             branching = not has_valid_current and len(valid) > 1
-            for index, (node_path, msgs, unknown_parts) in enumerate(valid, 1):
+            for index, (node_path, msgs, unknown_parts, excluded_internal) in enumerate(valid, 1):
                 base = str(conv.get("id") or f.stem)
                 cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
                 title = str(conv.get("title") or "未命名会话")
@@ -298,6 +313,8 @@ def parse_chatgpt(path: Path) -> tuple:
                 convs.append(_make_conversation("chatgpt", cid, title, msgs))
                 if unknown_parts:
                     skipped.append((cid, f"内部内容已排除：未识别附件 {unknown_parts} 个"))
+                if excluded_internal:
+                    skipped.append((cid, f"内部内容已排除：ChatGPT reasoning {excluded_internal} 个"))
     return convs, skipped, total
 
 
@@ -309,44 +326,49 @@ _GEMINI_URL_LINE = re.compile(r"^https?://gemini\.google\.com/")
 
 
 class _GeminiActivityExtractor(HTMLParser):
-    """Capture Takeout's visible activity containers without joining independent rows."""
-    _BLOCK = {"div", "p", "br", "li", "tr", "section", "article"}
+    """Capture Takeout fields and mark only structurally explicit activity times."""
+    _VOID = {"br", "img", "meta", "link", "input", "hr"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.blocks: list[list[str]] = []
-        self._parts: list[str] = []
+        self.blocks: list[tuple[list[str], set[int]]] = []
+        self._parts: list[tuple[str, bool]] = []
         self._depth = 0
+        self._tags: list[tuple[str, set[str]]] = []
 
     def handle_starttag(self, tag, attrs):
         classes = " ".join(value for key, value in attrs if key == "class")
         if self._depth == 0 and tag == "div" and ("outer-cell" in classes or "activity-container" in classes):
             self._depth = 1
             self._parts = []
+            self._tags = [(tag, set(classes.split()))]
             return
-        if self._depth and tag not in ("br", "img", "meta", "link", "input", "hr"):
+        if self._depth and tag not in self._VOID:
             self._depth += 1
-            if tag in self._BLOCK:
-                self._parts.append("\n")
+            self._tags.append((tag, set(classes.split())))
 
     def handle_endtag(self, tag):
         if not self._depth:
             return
-        if tag in ("br", "img", "meta", "link", "input", "hr"):
+        if tag in self._VOID:
             return
-        if tag in self._BLOCK:
-            self._parts.append("\n")
+        if self._tags:
+            self._tags.pop()
         self._depth -= 1
         if self._depth == 0:
-            text = "".join(self._parts)
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            lines = [text for text, _is_time in self._parts]
             if lines:
-                self.blocks.append(lines)
+                self.blocks.append((lines, {i for i, (_text, is_time) in enumerate(self._parts) if is_time}))
 
     def handle_data(self, data):
         if self._depth and data.strip():
-            # Takeout's adjacent data nodes are semantic fields, not one sentence.
-            self._parts.append("\n" + data.strip() + "\n")
+            tag, classes = self._tags[-1]
+            # In current Takeout the time is direct text in this cell; response
+            # content after <br> lives in nested p/h3/pre/li nodes.
+            is_time_field = (tag == "div" and (("content-cell" in classes
+                              and "mdl-typography--body-1" in classes)
+                             or "header-cell" in classes))
+            self._parts.append((data.strip(), is_time_field))
 
 
 def _gemini_time(lines: list[str]) -> Optional[str]:
@@ -412,7 +434,7 @@ def parse_gemini(path: Path) -> tuple:
         raise ImportError_(f"{target} 未找到可靠的 Gemini 活动容器（请改用手工整理）")
     activities = []
     pending = None
-    for lines in parser.blocks:
+    for lines, structural_time_indexes in parser.blocks:
         joined = "\n".join(lines)
         is_prompt = bool(re.search(r"(?:^|\n)Prompted\s*[:：]?", joined, re.I))
         is_legacy_answer = bool(re.search(r"(?:^|\n)Gemini\s*[:：]", joined, re.I))
@@ -421,12 +443,17 @@ def parse_gemini(path: Path) -> tuple:
                 activities.append(pending)
             prompt_index = next(i for i, line in enumerate(lines)
                                 if re.match(r"^Prompted\s*[:：]?", line, re.I))
-            timestamp_indexes = [i for i in range(prompt_index + 1, len(lines))
-                                 if _TIME_LINE.search(lines[i])]
-            # User prompts frequently contain dates.  Takeout's activity time is
-            # the final recognised time field before the visible answer.
-            timestamp_index = timestamp_indexes[-1] if timestamp_indexes else None
-            legacy_time = _gemini_time(lines[:prompt_index + 1])
+            timestamp_indexes = [i for i in structural_time_indexes if i > prompt_index
+                                 and _TIME_FIELD.fullmatch(lines[i])]
+            # Bind only direct content-cell/body-1 timestamp fields. Dates in
+            # nested answer markup (or in user fields) remain visible text.
+            if len(timestamp_indexes) > 1:
+                raise ImportError_(f"{target} 存在多个结构化活动时间，无法可靠绑定 Prompted 活动（请改用手工整理）")
+            timestamp_index = timestamp_indexes[0] if timestamp_indexes else None
+            legacy_timestamp_indexes = [i for i in structural_time_indexes if i <= prompt_index
+                                        and _TIME_FIELD.fullmatch(lines[i])]
+            legacy_time = (_gemini_time([lines[legacy_timestamp_indexes[0]]])
+                           if len(legacy_timestamp_indexes) == 1 else None)
             user_lines = lines[prompt_index:timestamp_index] if timestamp_index is not None else lines[prompt_index:]
             text = _gemini_user_text(user_lines)
             timestamp = _gemini_time([lines[timestamp_index]]) if timestamp_index is not None else legacy_time
@@ -460,9 +487,9 @@ def parse_gemini(path: Path) -> tuple:
         occurrence = activity_occurrences.get(activity_key, 0) + 1
         activity_occurrences[activity_key] = occurrence
         cid = f"activity-{fingerprint}" + (f"--occurrence-{occurrence}" if occurrence > 1 else "")
-        msgs = [("user", activity["time"], _stable_id("user", activity["time"], activity["user"]), activity["user"])]
+        msgs = [("user", activity["time"], f"{cid}:user:1", activity["user"])]
         if activity["answer"]:
-            msgs.append(("assistant", activity["time"], _stable_id("assistant", activity["time"], activity["answer"]), activity["answer"]))
+            msgs.append(("assistant", activity["time"], f"{cid}:assistant:2", activity["answer"]))
         convs.append(_make_conversation("gemini", cid, "Gemini 活动", msgs))
     return convs, [], len(activities)
 
@@ -503,6 +530,9 @@ def parse_deepseek(path: Path) -> tuple:
     tool_count = 0
     total = len(data or [])
     for conv in data or []:
+        if not isinstance(conv, dict):
+            skipped.append(("conversations.json", "会话条目结构损坏"))
+            continue
         mapping = conv.get("mapping") or {}
         try:
             paths = _root_to_leaf_paths(mapping)
@@ -821,19 +851,25 @@ def _first_user_snippet(msgs: list) -> str:
 # ---------- 写入：权限 0700/0600 + 原子写入 + 增量去重 ----------
 
 def _atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
     try:
         os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None
+        with f:
             f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     except BaseException:
+        if fd is not None:
+            os.close(fd)
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
-    os.replace(tmp, path)
     os.chmod(path, mode)
 
 
@@ -879,11 +915,18 @@ def save_imported(imported: dict, out_dir: Path) -> None:
 
 def _format_message(role: str, t: Optional[str], mid: str, text: str) -> str:
     tstr = t or "（未知）"
-    return f"**{role}**（{tstr}；message_id: {mid}）：\n{_normalize_message_text(text)}"
+    return f"**{role}**（{tstr}；message_id: {_escape_managed_markers(mid)}）：\n{_escape_managed_markers(text)}"
 
 
 def _render_messages(msgs: list) -> str:
     return "\n\n".join(_format_message(*m) for m in msgs)
+
+
+def _escape_managed_markers(text: str) -> str:
+    """Keep user text visible without allowing it to forge writer delimiters."""
+    text = _normalize_message_text(text)
+    return (text.replace("<!-- distill-messages:begin -->", "&lt;!-- distill-messages:begin --&gt;")
+                .replace("<!-- distill-messages:end -->", "&lt;!-- distill-messages:end --&gt;"))
 
 
 def _managed_parts(content: str, path: Path) -> tuple[str, str, str]:
@@ -921,7 +964,7 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
     old_cids = re.findall(r"^<!-- conversation_id: (.*?) -->\s*$", content, re.MULTILINE)
     if len(old_sources) != 1 or len(old_cids) != 1:
         raise ImportError_(f"文件名冲突：{key} 的现有目标缺少或重复所有权元数据")
-    if (old_sources[0], old_cids[0]) != (source, cid):
+    if (old_sources[0], old_cids[0]) != (_escape_managed_markers(source), _escape_managed_markers(cid)):
         raise ImportError_(f"文件名冲突：{key} 会覆盖现有会话 {old_sources[0]}:{old_cids[0]}")
 
 
@@ -966,9 +1009,9 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
 
 
 def _build_content(source: str, cid: str, title: str, exported_at: str, msgs: list) -> str:
-    lines = [f"# {source} · {title}", "",
-             f"<!-- source: {source} -->",
-             f"<!-- conversation_id: {cid} -->",
+    lines = [f"# {_escape_managed_markers(source)} · {_escape_managed_markers(title)}", "",
+             f"<!-- source: {_escape_managed_markers(source)} -->",
+             f"<!-- conversation_id: {_escape_managed_markers(cid)} -->",
              f"<!-- exported_at: {exported_at} -->",
              "", "<!-- distill-messages:begin -->"]
     if msgs:
@@ -1210,11 +1253,12 @@ def _classify_local_file(path: Path, forced: str) -> str:
                 if not line.strip():
                     continue
                 record = json.loads(line)
+                if record.get("type") in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
+                    continue
                 if record.get("type") == "session_meta" or "payload" in record:
                     return "codex"
                 if record.get("type") in ("user", "assistant", "mode") or "message" in record:
                     return "claude"
-                break
     except (OSError, json.JSONDecodeError) as e:
         raise ImportError_(f"无法识别本地 JSONL：{e}")
     raise ImportError_("无法自动识别本地 JSONL；请使用 --local-format codex 或 claude")
@@ -1222,6 +1266,12 @@ def _classify_local_file(path: Path, forced: str) -> str:
 
 def discover_local_path(root: Path, since: Optional[str], excludes: tuple, forced: str) -> tuple[list, list]:
     found, failures = [], []
+    if not root.exists():
+        return found, [(str(root), "本地路径不存在")]
+    if root.is_file() and root.suffix != ".jsonl":
+        return found, [(str(root), "本地路径不是 JSONL 会话")]
+    if root.is_dir() and not any(root.rglob("*.jsonl")):
+        return found, [(str(root), "本地路径未包含 JSONL 会话")]
     candidates = [root] if root.is_file() else sorted(root.rglob("*.jsonl"))
     for path in candidates:
         if path.suffix != ".jsonl":

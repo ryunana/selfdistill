@@ -75,6 +75,24 @@ class ParserTests(unittest.TestCase):
         self.assertIn("滤杯", msgs[2][3])
         self.assertFalse(any("重写分支" in m[3] for m in msgs))
 
+    def test_chatgpt_outer_reasoning_content_is_excluded_even_with_text_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            data = [{"id": "reasoning", "title": "x", "current_node": "a", "mapping": {
+                "root": {"parent": None, "children": ["r"]},
+                "r": {"parent": "root", "children": ["a"], "message": {
+                    "id": "r", "author": {"role": "assistant"},
+                    "content": {"content_type": "reasoning", "parts": ["不得泄漏的推理"]}}},
+                "a": {"parent": "r", "children": [], "message": {
+                    "id": "a", "author": {"role": "assistant"},
+                    "content": {"parts": ["可见回答"]}}},
+            }}]
+            p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual([m[3] for m in convs[0][4]], ["可见回答"])
+            self.assertTrue(any(reason.startswith("内部内容已排除：ChatGPT reasoning")
+                                for _ref, reason in skipped))
+
     def test_chatgpt_empty_conversation_reported(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "conversations-000.json"
@@ -367,8 +385,8 @@ class ParserTests(unittest.TestCase):
             p.write_text("""<html><body><div class='outer-cell'>
 <div>Gemini Apps</div><div>Prompted：</div>
 <div>2026年8月1日 上午9:00</div><div>2026年8月2日 下午3:00</div>
-<div>请比较这两个时间安排。</div><div>2026年8月3日 下午4:05</div>
-<div>可以先处理第一项。</div></div></body></html>""", encoding="utf-8")
+<div>请比较这两个时间安排。</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><br><p>可以先处理第一项。</p></div></div></body></html>""", encoding="utf-8")
             convs, _skipped, total = ic.parse_gemini(p)
             self.assertEqual((total, len(convs)), (1, 1))
             msgs = convs[0][4]
@@ -377,14 +395,49 @@ class ParserTests(unittest.TestCase):
             self.assertIn("2026年8月2日 下午3:00", msgs[0][3])
             self.assertIn("可以先处理第一项", msgs[1][3])
 
+    def test_gemini_structural_time_preserves_date_in_answer_and_ids_are_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div>Gemini Apps</div><div>Prompted：请安排</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><br><p>回答中提到 2026年8月5日 上午9:00。</p></div></div></body></html>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            cid = convs[0][1]
+            msgs = convs[0][4]
+            self.assertEqual({m[1] for m in msgs}, {"2026-08-03 16:05"})
+            self.assertIn("2026年8月5日 上午9:00", msgs[1][3])
+            self.assertEqual([m[2] for m in msgs], [f"{cid}:user:1", f"{cid}:assistant:2"])
+
+    def test_gemini_unstructured_inline_time_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div>Prompted：问题</div><div>2026年8月3日 下午4:05</div><div>回答</div>
+</div></body></html>""", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "无法可靠绑定"):
+                ic.parse_gemini(p)
+
+    def test_gemini_multiple_structural_inline_times_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div>Prompted：问题</div>
+<div class='content-cell mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div class='content-cell mdl-typography--body-1'>2026年8月4日 下午4:05</div>
+<div><br><p>回答</p></div></div></body></html>""", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "多个结构化活动时间"):
+                ic.parse_gemini(p)
+
     def test_gemini_splits_prompted_activities_with_stable_ids(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "我的活动记录.html"
             p.write_text("""<html><body>
-<div class='outer-cell'><div>2026年8月1日 下午3:00</div><div>Prompted：重复问题</div></div>
-<div class='outer-cell'><div>2026年8月1日 下午3:01</div><div>Gemini：第一个回答</div></div>
-<div class='outer-cell'><div>2026年8月2日 下午3:00</div><div>Prompted：重复问题</div><div>Attached 1 files.</div><div>a.pdf</div></div>
-<div class='outer-cell'><div>2026年8月2日 下午3:01</div><div>Gemini：第二个回答</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:00</div><div>Prompted：重复问题</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:01</div><div>Gemini：第一个回答</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月2日 下午3:00</div><div>Prompted：重复问题</div><div>Attached 1 files.</div><div>a.pdf</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月2日 下午3:01</div><div>Gemini：第二个回答</div></div>
 </body></html>""", encoding="utf-8")
             convs, _skipped, total = ic.parse_gemini(p)
             self.assertEqual((total, len(convs)), (2, 2))
@@ -395,13 +448,14 @@ class ParserTests(unittest.TestCase):
     def test_gemini_identical_activity_keys_get_stable_occurrences(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "我的活动记录.html"
-            block = "<div class='outer-cell'><div>Gemini Apps</div><div>Prompted：同一个问题</div><div>2026年8月3日 下午4:05</div><div>同一个回答</div></div>"
+            block = "<div class='outer-cell'><div>Gemini Apps</div><div>Prompted：同一个问题</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><div><br><p>同一个回答</p></div></div>"
             p.write_text(f"<html><body>{block}{block}</body></html>", encoding="utf-8")
             first, _skipped, total = ic.parse_gemini(p)
             second, _skipped, _total = ic.parse_gemini(p)
             self.assertEqual((total, len(first)), (2, 2))
             self.assertEqual([c[1] for c in first], [c[1] for c in second])
             self.assertEqual(len({c[1] for c in first}), 2)
+            self.assertEqual(len({m[2] for c in first for m in c[4]}), 4)
 
 
 class FmtTimeTests(unittest.TestCase):
@@ -560,6 +614,40 @@ class CliTests(unittest.TestCase):
             self.assertTrue(any(call.args[1] == 0o600 for call in fchmod.call_args_list))
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
+    def test_atomic_write_ignores_predictable_tmp_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private.md"
+            sentinel = root / "sentinel"
+            sentinel.write_text("outside", encoding="utf-8")
+            path.with_name(path.name + ".tmp").symlink_to(sentinel)
+            ic._atomic_write(path, "inside")
+            self.assertEqual(path.read_text(encoding="utf-8"), "inside")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+
+    def test_atomic_write_cleans_unique_tmp_when_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "private.md"
+            with unittest.mock.patch("os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    ic._atomic_write(path, "inside")
+            self.assertEqual(list(Path(td).glob(".private.md.*.tmp")), [])
+
+    def test_reserved_markers_in_user_fields_do_not_corrupt_repeat_import(self) -> None:
+        out = self._tmp()
+        marker_text = "<prompt>正常 XML</prompt>\n<!-- distill-messages:begin -->\n<!-- distill-messages:end -->"
+        conv = ("chatgpt", "marker", "标题 <!-- distill-messages:begin -->", "2026-08-01", [
+            ("user", None, "id-<!-- distill-messages:end -->", marker_text),
+        ])
+        imported = {}
+        self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+        self.assertEqual(ic.write_conversation(conv, imported, out), "dup")
+        content = (out / "chatgpt-marker.md").read_text(encoding="utf-8")
+        self.assertEqual(content.count("<!-- distill-messages:begin -->"), 1)
+        self.assertEqual(content.count("<!-- distill-messages:end -->"), 1)
+        self.assertIn("&lt;!-- distill-messages:begin --&gt;", content)
+        self.assertIn("<prompt>正常 XML</prompt>", content)
+
     def test_writer_rebuilds_changed_branch_and_recovers_state_from_markdown(self) -> None:
         out = self._tmp()
         first = ("chatgpt", "branch", "标题", "2026-08-01", [
@@ -667,6 +755,18 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(r.returncode, 1, r.stderr)
                 self.assertIn("无消息", r.stdout)
 
+    def test_non_dict_chatgpt_and_deepseek_items_fail_without_traceback(self) -> None:
+        for source, filename in (("chatgpt", "conversations-000.json"),
+                                 ("deepseek", "conversations.json")):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                export = Path(td) / filename
+                export.write_text("[null]", encoding="utf-8")
+                r = run_import("--source", source, "--path", str(export),
+                               "--root", str(self._tmp()), "--yes")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("会话条目结构损坏", r.stdout)
+                self.assertNotIn("Traceback", r.stderr)
+
     def test_local_dry_run_fixture_roots(self) -> None:
         codex_root = FIXTURE / "codex" / "sessions"
         found = ic.discover_local(roots=(("codex", str(codex_root), "rollout-*.jsonl"),))
@@ -704,6 +804,35 @@ class CliTests(unittest.TestCase):
             self.assertIn("预计新导入 2", r.stdout)
             self.assertIn("解析/写入失败 1", r.stdout)
             self.assertFalse(out.exists())
+
+    def test_local_auto_skips_known_claude_preamble_before_classifying(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            session = root / "claude.jsonl"
+            session.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "file-history-snapshot", "payload": {}},
+                {"type": "user", "uuid": "u", "message": {"role": "user", "content": "真实内容"}},
+            ]), encoding="utf-8")
+            r = run_import("--source", "local", "--path", str(root), "--root", str(Path(td) / "out"),
+                           "--dry-run")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("预计新导入 1", r.stdout)
+
+    def test_nonexistent_or_empty_local_path_is_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "missing"
+            empty = Path(td) / "empty"
+            not_jsonl = Path(td) / "notes.txt"
+            empty.mkdir()
+            not_jsonl.write_text("not a session", encoding="utf-8")
+            for path, expected in ((missing, "本地路径不存在"), (empty, "本地路径未包含 JSONL 会话"),
+                                   (not_jsonl, "本地路径不是 JSONL 会话")):
+                with self.subTest(path=path):
+                    r = run_import("--source", "local", "--path", str(path),
+                                   "--root", str(Path(td) / "out"), "--dry-run")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(expected, r.stdout)
 
     def test_local_dry_run_claims_paths_and_reports_same_source_collisions(self) -> None:
         out = self._tmp()
