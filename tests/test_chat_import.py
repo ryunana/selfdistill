@@ -44,6 +44,53 @@ class ParserTests(unittest.TestCase):
                 "a": {"parent": "root", "children": []},
             })
 
+    def test_path_helper_rejects_falsey_children_duplicates_and_multiple_roots(self) -> None:
+        invalid_mappings = [
+            {"root": {"parent": None, "children": value}}
+            for value in (0, False, "", {})
+        ] + [
+            {"root": {"parent": None, "children": ["child", "child"]},
+             "child": {"parent": "root", "children": []}},
+            {"root": {"parent": None, "children": []},
+             "other": {"parent": None, "children": []}},
+        ]
+        for mapping in invalid_mappings:
+            with self.assertRaises(ic.ImportError_):
+                ic._root_to_leaf_paths(mapping)
+
+    def test_fallback_parsers_reject_invalid_tree_shapes(self) -> None:
+        def mapping(kind: str, message: dict) -> dict:
+            if kind == "falsey":
+                return {"root": {"parent": None, "children": 0, "message": message}}
+            if kind == "duplicate":
+                return {
+                    "root": {"parent": None, "children": ["child", "child"], "message": message},
+                    "child": {"parent": "root", "children": [], "message": message},
+                }
+            return {
+                "root": {"parent": None, "children": [], "message": message},
+                "other": {"parent": None, "children": [], "message": message},
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            chatgpt = root / "conversations-000.json"
+            deepseek = root / "conversations.json"
+            chat_message = {"author": {"role": "user"}, "content": {"parts": ["visible"]}}
+            deep_message = {"fragments": [{"type": "REQUEST", "content": "visible"}]}
+            for kind in ("falsey", "duplicate", "roots"):
+                chatgpt.write_text(json.dumps([{"id": "safe", "current_node": "missing",
+                                                 "mapping": mapping(kind, chat_message)}]), encoding="utf-8")
+                convs, skipped, _total = ic.parse_chatgpt(chatgpt)
+                self.assertEqual(convs, [])
+                self.assertIn("会话 mapping 结构损坏", [reason for _ref, reason in skipped])
+
+                deepseek.write_text(json.dumps([{"id": "safe", "mapping": mapping(kind, deep_message)}]),
+                                    encoding="utf-8")
+                convs, skipped, _total = ic.parse_deepseek(deepseek)
+                self.assertEqual(convs, [])
+                self.assertIn("会话 mapping 结构损坏", [reason for _ref, reason in skipped])
+
     def test_chatgpt_missing_current_node_splits_leaf_paths_and_redacts_parts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "conversations-000.json"
@@ -719,6 +766,22 @@ class ParserTests(unittest.TestCase):
                 z.writestr("two/conversations.json", "[]")
             with self.assertRaisesRegex(ic.ImportError_, "^DeepSeek ZIP conversations\\.json 候选不唯一$"):
                 ic.parse_deepseek(archive)
+
+    def test_deepseek_zip_requires_exact_conversations_json_basename(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            decoys = root / "decoys.zip"
+            with zipfile.ZipFile(decoys, "w") as z:
+                z.writestr("not-conversations.json", "[]")
+                z.writestr("folder/myconversations.json", "[]")
+                z.writestr("folder/conversations.json/", "")
+            with self.assertRaisesRegex(ic.ImportError_, "^DeepSeek ZIP 未找到 conversations\\.json$"):
+                ic.parse_deepseek(decoys)
+
+            nested = root / "nested.zip"
+            with zipfile.ZipFile(nested, "w") as z:
+                z.writestr("folder/conversations.json", "[]")
+            self.assertEqual(ic.parse_deepseek(nested), ([], [], 0))
 
     def test_claude_excludes_internal_records_not_marker_mentions(self) -> None:
         with tempfile.TemporaryDirectory() as td:

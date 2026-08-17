@@ -167,6 +167,9 @@ def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
     nodes = {str(nid): node for nid, node in mapping.items() if isinstance(node, dict)}
     if not nodes:
         raise ImportError_("会话 mapping 没有有效节点")
+    roots = [nid for nid, node in nodes.items() if node.get("parent") is None]
+    if len(roots) != 1:
+        raise ImportError_("会话 mapping 必须恰有一个根节点")
     children: dict[str, list[str]] = {nid: [] for nid in nodes}
     for nid, node in nodes.items():
         parent = node.get("parent")
@@ -177,16 +180,22 @@ def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
             raise ImportError_("会话 mapping 存在断链")
         children[parent].append(nid)
     for nid, node in nodes.items():
-        declared = node.get("children") or []
-        if not isinstance(declared, list):
+        raw_declared = node.get("children")
+        if raw_declared is None:
+            declared = []
+        elif isinstance(raw_declared, list):
+            declared = raw_declared
+        else:
             raise ImportError_("会话 mapping 的 children 不是列表")
-        for child in declared:
-            child = str(child)
+        normalized_declared = [str(child) for child in declared]
+        if len(normalized_declared) != len(set(normalized_declared)):
+            raise ImportError_("会话 mapping 的 children 存在重复引用")
+        for child in normalized_declared:
             if child not in nodes:
                 raise ImportError_("会话 mapping 存在断链")
             if str(nodes[child].get("parent")) != nid:
                 raise ImportError_("会话 mapping 的 parent/children 不一致")
-        if set(map(str, declared)) != set(children[nid]):
+        if set(normalized_declared) != set(children[nid]):
             raise ImportError_("会话 mapping 的 parent/children 不一致")
     for start in nodes:
         seen = set()
@@ -627,7 +636,8 @@ def parse_deepseek(path: Path) -> tuple:
     elif str(path).endswith(".zip"):
         try:
             with zipfile.ZipFile(path) as z:
-                names = sorted(n for n in z.namelist() if n.endswith("conversations.json"))
+                names = sorted(n for n in z.namelist()
+                               if not n.endswith("/") and n.rsplit("/", 1)[-1] == "conversations.json")
                 if not names:
                     raise ImportError_("DeepSeek ZIP 未找到 conversations.json")
                 if len(names) > 1:
