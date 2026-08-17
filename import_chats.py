@@ -368,11 +368,12 @@ def parse_chatgpt(path: Path) -> tuple:
                 if msgs:
                     valid.append((node_path, msgs))
             if not valid:
+                # A recognized source conversation with no visible message is
+                # still a failed import, even if its omitted nodes are expected.
+                skipped.append(("—", SKIP_EMPTY))
                 if reasoning_nodes:
                     skipped.append(("—",
                                     f"内部内容已排除：ChatGPT reasoning {len(reasoning_nodes)} 个"))
-                else:
-                    skipped.append(("—", SKIP_EMPTY))
                 if unknown_parts_by_node:
                     skipped.append(("—", f"未识别 ChatGPT 附件 {sum(unknown_parts_by_node.values())} 个"))
                 for _ in unknown_role_nodes:
@@ -1612,8 +1613,7 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
             continue
         bad.extend((sid, reason) for reason in events)
         if not convs:
-            if not events:
-                bad.append((sid, SKIP_EMPTY))
+            bad.append((sid, SKIP_EMPTY))
             continue
         key = f"{convs[0][0]}:{convs[0][1]}"
         if key in seen_keys:

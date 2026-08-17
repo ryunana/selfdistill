@@ -145,6 +145,25 @@ class ParserTests(unittest.TestCase):
             self.assertTrue(any(reason.startswith("内部内容已排除：ChatGPT reasoning")
                                 for _ref, reason in skipped))
 
+    def test_reasoning_only_chatgpt_keeps_exclusion_and_records_no_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([{"id": "reasoning-only", "current_node": "n", "mapping": {
+                "n": {"parent": None, "children": [], "message": {
+                    "author": {"role": "assistant"},
+                    "content": {"content_type": "reasoning", "parts": ["internal"]}}},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            reasons = [reason for _ref, reason in skipped]
+            self.assertEqual(convs, [])
+            self.assertEqual(reasons.count(ic.SKIP_EMPTY), 1)
+            self.assertEqual(reasons.count("内部内容已排除：ChatGPT reasoning 1 个"), 1)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(1, 0, 0, 0, 0, skipped, "chatgpt", False)
+            self.assertIn("预期内部内容排除 1 个片段", stream.getvalue())
+            self.assertIn("解析/写入失败 1：无消息", stream.getvalue())
+
     def test_gemini_container_classes_are_exact_tokens_and_allow_valueless_attrs(self) -> None:
         parser = ic._GeminiActivityExtractor()
         parser.feed("<div class='not-outer-cell'><div>忽略</div></div><div class><div>也忽略</div></div>")
@@ -1552,6 +1571,55 @@ class CliTests(unittest.TestCase):
                                "--root", str(self._tmp()), "--yes")
                 self.assertEqual(r.returncode, 1, r.stderr)
                 self.assertIn("无消息", r.stdout)
+
+    def test_all_empty_expected_exclusions_still_exit_one(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            chatgpt = root / "conversations-000.json"
+            chatgpt.write_text(json.dumps([{"id": "reasoning-only", "mapping": {
+                "n": {"parent": None, "children": [], "message": {
+                    "author": {"role": "assistant"},
+                    "content": {"content_type": "reasoning", "parts": ["internal"]}}},
+            }}]), encoding="utf-8")
+            r = run_import("--source", "chatgpt", "--path", str(chatgpt),
+                           "--root", str(root / "chat-out"), "--yes")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("预期内部内容排除 1 个片段", r.stdout)
+            self.assertIn("无消息", r.stdout)
+
+            for local_format, record in (
+                ("codex", {"type": "session_meta", "payload": {"id": "internal"}}),
+                ("claude", {"type": "system", "payload": {}}),
+            ):
+                with self.subTest(local_format=local_format):
+                    session = root / f"{local_format}.jsonl"
+                    session.write_text(json.dumps(record), encoding="utf-8")
+                    r = run_import("--source", "local", "--path", str(session),
+                                   "--local-format", local_format, "--root", str(root / f"{local_format}-out"),
+                                   "--dry-run")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn("预期内部内容排除 1 个片段", r.stdout)
+                    self.assertIn("解析/写入失败 1：无消息", r.stdout)
+
+    def test_mixed_local_visible_and_internal_only_sessions_exit_two(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            (root / "internal.jsonl").write_text(json.dumps({
+                "type": "session_meta", "payload": {"id": "internal"},
+            }), encoding="utf-8")
+            (root / "visible.jsonl").write_text(json.dumps({
+                "type": "response_item", "payload": {"type": "message", "role": "user",
+                                                             "content": [{"type": "input_text", "text": "visible"}]},
+            }), encoding="utf-8")
+            out = Path(td) / "out"
+            r = run_import("--source", "local", "--path", str(root), "--local-format", "codex",
+                           "--root", str(out), "--dry-run")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("预计新导入 1", r.stdout)
+            self.assertIn("预期内部内容排除 1 个片段", r.stdout)
+            self.assertIn("解析/写入失败 1：无消息", r.stdout)
+            self.assertFalse(out.exists())
 
     def test_non_dict_chatgpt_and_deepseek_items_fail_without_traceback(self) -> None:
         for source, filename in (("chatgpt", "conversations-000.json"),
