@@ -321,10 +321,10 @@ def parse_chatgpt(path: Path) -> tuple:
             valid = []
             unknown_role_nodes: set[str] = set()
             known_internal_role_nodes: set[str] = set()
+            reasoning_nodes: set[str] = set()
+            unknown_parts_by_node: dict[str, int] = {}
             for node_path in paths:
                 msgs = []
-                unknown_parts = 0
-                excluded_internal = 0
                 for nid in node_path:
                     node = mapping[nid]
                     if not isinstance(node.get("message"), dict):
@@ -342,39 +342,42 @@ def parse_chatgpt(path: Path) -> tuple:
                     content = msg.get("content") or {}
                     content_kind = str(content.get("content_type") or content.get("type") or "").lower()
                     if content_kind in ("thoughts", "reasoning_recap", "reasoning"):
-                        excluded_internal += 1
+                        reasoning_nodes.add(nid)
                         continue
                     text, unknown = _chatgpt_parts(content.get("parts"))
-                    unknown_parts += unknown
+                    if unknown:
+                        unknown_parts_by_node.setdefault(nid, unknown)
                     if not text:
                         continue
                     mid = _safe_scalar(msg.get("id")) or nid or _stable_id(role, None, text)
                     msgs.append((role, fmt_time(msg.get("create_time")), mid, text))
                 if msgs:
-                    valid.append((node_path, msgs, unknown_parts, excluded_internal))
+                    valid.append((node_path, msgs))
             if not valid:
-                if excluded_internal:
+                if reasoning_nodes:
                     skipped.append(("—",
-                                    f"内部内容已排除：ChatGPT reasoning {excluded_internal} 个"))
+                                    f"内部内容已排除：ChatGPT reasoning {len(reasoning_nodes)} 个"))
                 else:
                     skipped.append(("—", SKIP_EMPTY))
+                if unknown_parts_by_node:
+                    skipped.append(("—", f"未识别 ChatGPT 附件 {sum(unknown_parts_by_node.values())} 个"))
                 for _ in unknown_role_nodes:
                     skipped.append(("—", "未知 ChatGPT 消息角色"))
                 for _ in known_internal_role_nodes:
                     skipped.append(("—", "内部内容已排除：ChatGPT 已知消息角色"))
                 continue
             branching = not has_valid_current and len(valid) > 1
-            for index, (node_path, msgs, unknown_parts, excluded_internal) in enumerate(valid, 1):
+            for index, (node_path, msgs) in enumerate(valid, 1):
                 base = _safe_scalar(conv.get("id")) or _record_fallback_id("chatgpt", f.name, record_index)
                 cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
                 title = _safe_title(conv.get("title"))
                 if branching:
                     title += f"（分支 {index}）"
                 convs.append(_make_conversation("chatgpt", cid, title, msgs))
-                if unknown_parts:
-                    skipped.append((cid, f"未识别 ChatGPT 附件 {unknown_parts} 个"))
-                if excluded_internal:
-                    skipped.append((cid, f"内部内容已排除：ChatGPT reasoning {excluded_internal} 个"))
+            if unknown_parts_by_node:
+                skipped.append(("—", f"未识别 ChatGPT 附件 {sum(unknown_parts_by_node.values())} 个"))
+            if reasoning_nodes:
+                skipped.append(("—", f"内部内容已排除：ChatGPT reasoning {len(reasoning_nodes)} 个"))
             for _ in unknown_role_nodes:
                 skipped.append(("—", "未知 ChatGPT 消息角色"))
             for _ in known_internal_role_nodes:
@@ -523,17 +526,18 @@ def parse_gemini(path: Path) -> tuple:
     activities = []
     pending = None
     for lines, structural_time_indexes, provider_indexes, chrome_indexes in parser.blocks:
-        is_prompt = any(i in provider_indexes and (re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
-                        or re.match(r"^Prompted\s+", line, re.I))
-                        for i, line in enumerate(lines))
+        prompt_indexes = [i for i, line in enumerate(lines)
+                          if i in provider_indexes and (re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
+                          or re.match(r"^Prompted\s+", line, re.I))]
+        if len(prompt_indexes) > 1:
+            raise ImportError_(f"{target} 存在多个结构化 Prompted 标记，无法可靠绑定活动（请改用手工整理）")
+        is_prompt = bool(prompt_indexes)
         is_legacy_answer = any(i in provider_indexes and re.match(r"^Gemini(?:\s*[:：]|\s*$)", line, re.I)
                                for i, line in enumerate(lines))
         if is_prompt:
             if pending is not None:
                 activities.append(pending)
-            prompt_index = next(i for i, line in enumerate(lines)
-                                if i in provider_indexes and (re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
-                                or re.match(r"^Prompted\s+", line, re.I)))
+            prompt_index = prompt_indexes[0]
             timestamp_indexes = [i for i in structural_time_indexes if i > prompt_index
                                  and _TIME_FIELD.fullmatch(lines[i])]
             # Bind only direct content-cell/body-1 timestamp fields. Dates in
@@ -922,6 +926,17 @@ def _codex_session_id(path: Path) -> str:
     return path.stem.removeprefix("rollout-") or path.stem
 
 
+_CODEX_KNOWN_TOP_LEVEL_TYPES = {
+    "session_meta", "turn_context", "event_msg", "compacted",
+    "inter_agent_communication_metadata", "world_state",
+}
+_CODEX_KNOWN_RESPONSE_PAYLOAD_TYPES = {
+    "agent_message", "custom_tool_call", "custom_tool_call_output",
+    "function_call", "function_call_output", "image_generation_call",
+    "reasoning", "tool_search_call", "tool_search_output", "web_search_call",
+}
+
+
 def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list]:
     cid = _codex_session_id(path)
     msgs: list = []
@@ -945,7 +960,15 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
                     if events is not None:
                         events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行")
                     continue
-                if d.get("type") != "response_item":
+                raw_top_type = d.get("type")
+                top_type = raw_top_type if isinstance(raw_top_type, str) else ""
+                if top_type in _CODEX_KNOWN_TOP_LEVEL_TYPES:
+                    if events is not None:
+                        events.append("内部内容已排除：Codex 已知顶层记录")
+                    continue
+                if top_type != "response_item":
+                    if events is not None:
+                        events.append("未知 Codex 顶层记录类型")
                     continue
                 raw_payload = d.get("payload")
                 if raw_payload is not None and not isinstance(raw_payload, dict):
@@ -957,7 +980,15 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
                     if events is not None:
                         events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 payload 不是对象")
                     continue
-                if payload.get("type") != "message":
+                raw_payload_type = payload.get("type")
+                payload_type = raw_payload_type if isinstance(raw_payload_type, str) else ""
+                if payload_type in _CODEX_KNOWN_RESPONSE_PAYLOAD_TYPES:
+                    if events is not None:
+                        events.append("内部内容已排除：Codex 已知响应记录")
+                    continue
+                if payload_type != "message":
+                    if events is not None:
+                        events.append("未知 Codex 响应记录类型")
                     continue
                 raw_role = payload.get("role")
                 role = raw_role.lower() if isinstance(raw_role, str) else ""
@@ -1586,8 +1617,8 @@ def _is_expected_exclusion(reason: str) -> bool:
 def _expected_exclusion_count(expected: list[tuple[str, str]]) -> int:
     count = 0
     for _ref, reason in expected:
-        match = re.match(r"工具片段\s+(\d+)\s+条", reason)
-        count += int(match.group(1)) if match else 1
+        match = re.match(r"(?:工具片段\s+(\d+)\s+条|内部内容已排除：ChatGPT reasoning\s+(\d+)\s+个)", reason)
+        count += int(match.group(1) or match.group(2)) if match else 1
     return count
 
 

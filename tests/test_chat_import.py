@@ -260,7 +260,7 @@ class ParserTests(unittest.TestCase):
             convs = ic.parse_codex(p, events)
             self.assertEqual([m[3] for m in convs[0][4]], ["[图片]", "[图片]"])
             self.assertNotIn("private.example", "\n".join(m[3] for m in convs[0][4]))
-            self.assertFalse(events)
+            self.assertEqual(events, ["内部内容已排除：Codex 已知顶层记录"])
 
     def test_codex_empty_known_text_block_is_ignored_without_warning(self) -> None:
         events = []
@@ -514,6 +514,67 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(len(convs), 2)
             self.assertEqual(sum(reason == "内部内容已排除：ChatGPT 已知消息角色" for reason in reasons), 2)
             self.assertEqual(sum(reason == "未知 ChatGPT 消息角色" for reason in reasons), 2)
+
+    def test_chatgpt_shared_branch_reasoning_and_unknown_parts_are_counted_once(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([{"id": "shared", "current_node": "missing", "mapping": {
+                "root": {"parent": None, "children": ["reasoning"]},
+                "reasoning": {"parent": "root", "children": ["user"], "message": {
+                    "author": {"role": "assistant"}, "content": {
+                        "content_type": "reasoning", "parts": ["internal"]}}},
+                "user": {"parent": "reasoning", "children": ["left", "right"], "message": {
+                    "author": {"role": "user"}, "content": {
+                        "parts": ["prompt", {"opaque": 1}, {"opaque": 2}]}}},
+                "left": {"parent": "user", "children": [], "message": {
+                    "author": {"role": "assistant"}, "content": {"parts": ["left"]}}},
+                "right": {"parent": "user", "children": [], "message": {
+                    "author": {"role": "assistant"}, "content": {"parts": ["right"]}}},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            reasons = [reason for _ref, reason in skipped]
+            self.assertEqual(len(convs), 2)
+            self.assertEqual(reasons.count("内部内容已排除：ChatGPT reasoning 1 个"), 1)
+            self.assertEqual(reasons.count("未识别 ChatGPT 附件 2 个"), 1)
+            expected = [(ref, reason) for ref, reason in skipped if ic._is_expected_exclusion(reason)]
+            self.assertEqual(ic._expected_exclusion_count(expected), 1)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(1, 2, 0, 0, 0, skipped, "chatgpt", False)
+            self.assertIn("预期内部内容排除 1 个片段", stream.getvalue())
+
+    def test_codex_record_types_are_classified_without_raw_values(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rollout-types.jsonl"
+            secret = "private-type-value"
+            known_top = ["session_meta", "turn_context", "event_msg", "compacted",
+                         "inter_agent_communication_metadata", "world_state"]
+            known_payload = ["agent_message", "custom_tool_call", "custom_tool_call_output",
+                             "function_call", "function_call_output", "image_generation_call",
+                             "reasoning", "tool_search_call", "tool_search_output", "web_search_call"]
+            records = ([{"type": record_type} for record_type in known_top]
+                       + [{"type": secret}, {"type": {"secret": secret}}]
+                       + [{"type": "response_item", "payload": {"type": record_type}}
+                          for record_type in known_payload]
+                       + [{"type": "response_item", "payload": {"type": secret}},
+                          {"type": "response_item", "payload": {"type": {"secret": secret}}},
+                          {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                                         "content": [{"type": "input_text", "text": "visible"}]}}])
+            p.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+            events = []
+            convs = ic.parse_codex(p, events)
+            self.assertIsNotNone(convs)
+            self.assertEqual(sum(event == "内部内容已排除：Codex 已知顶层记录" for event in events),
+                             len(known_top))
+            self.assertEqual(sum(event == "内部内容已排除：Codex 已知响应记录" for event in events),
+                             len(known_payload))
+            self.assertEqual(sum(event == "未知 Codex 顶层记录类型" for event in events), 2)
+            self.assertEqual(sum(event == "未知 Codex 响应记录类型" for event in events), 2)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(len(records), 1, 0, 0, 0,
+                                [("—", event) for event in events], "local", False)
+            self.assertNotIn(secret, stream.getvalue())
 
     def test_claude_non_string_type_is_structured_failure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -833,6 +894,17 @@ class ParserTests(unittest.TestCase):
 <div class='content-cell mdl-typography--body-1'>2026年8月4日 下午4:05</div>
 <div><br><p>回答</p></div></div></body></html>""", encoding="utf-8")
             with self.assertRaisesRegex(ic.ImportError_, "多个结构化活动时间"):
+                ic.parse_gemini(p)
+
+    def test_gemini_multiple_structural_prompted_markers_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：first</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：second</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><p>answer</p></div></div></body></html>""", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "多个结构化 Prompted 标记"):
                 ic.parse_gemini(p)
 
     def test_gemini_legacy_answer_keeps_date_text(self) -> None:
@@ -1544,7 +1616,7 @@ class CliTests(unittest.TestCase):
             r = run_import("--source", "local", "--path", str(root), "--local-format", "codex",
                            "--root", str(out), "--dry-run")
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-            self.assertIn("预期内部内容排除 1 个片段", r.stdout)
+            self.assertIn("预期内部内容排除 2 个片段", r.stdout)
             self.assertIn("解析/写入失败 1", r.stdout)
             self.assertFalse(out.exists())
 
