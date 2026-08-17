@@ -240,6 +240,53 @@ class ParserTests(unittest.TestCase):
         ordinary = "用户说：# Files mentioned by the user: 只是一个字符串"
         self.assertEqual(ic._clean_codex_user(ordinary), ordinary)
 
+    def test_codex_unclosed_known_wrappers_are_excluded_but_generic_xml_survives(self) -> None:
+        events = []
+        self.assertEqual(ic._clean_codex_user("<environment_context><cwd>/private", events), "")
+        self.assertEqual(ic._clean_codex_user("# AGENTS.md instructions for /\n<INSTRUCTIONS>partial", events), "")
+        self.assertTrue(any("残留未闭合" in event for event in events))
+        self.assertEqual(ic._clean_codex_user("<name>Ada</name><path>/safe</path>"),
+                         "<name>Ada</name><path>/safe</path>")
+
+    def test_malformed_json_boundaries_are_reported_without_attribute_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            chatgpt = root / "conversations-000.json"
+            for bad_mapping in ([], {"n": {"message": {"content": {"parts": "not-a-list"}}}}):
+                chatgpt.write_text(json.dumps([{"id": "x", "mapping": bad_mapping}]), encoding="utf-8")
+                _convs, skipped, _total = ic.parse_chatgpt(chatgpt)
+                self.assertTrue(any("mapping" in reason or "消息结构" in reason for _ref, reason in skipped))
+            deepseek = root / "conversations.json"
+            for bad_mapping in ([], {"n": {"parent": None, "children": [], "message": {"fragments": ["bad"]}}},
+                                {"n": {"parent": None, "children": [], "message": {"fragments": [{"type": "FILE", "files": "bad"}]}}}):
+                deepseek.write_text(json.dumps([{"id": "x", "mapping": bad_mapping}]), encoding="utf-8")
+                _convs, skipped, _total = ic.parse_deepseek(deepseek)
+                self.assertTrue(any("结构损坏" in reason or "mapping" in reason for _ref, reason in skipped))
+            codex = root / "rollout-bad.jsonl"
+            codex.write_text("[]\n" + "\n".join(json.dumps({"type": "response_item", "payload": value})
+                                                     for value in ([], ["bad"])), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_codex(codex, events))
+            self.assertTrue(any("结构损坏" in event for event in events))
+            claude = root / "bad-claude.jsonl"
+            claude.write_text("[]\n" + "\n".join(json.dumps({"type": "user", "message": value})
+                                                      for value in ([], ["bad"])), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_claude(claude, events))
+            self.assertTrue(any("结构损坏" in event for event in events))
+            with self.assertRaises(ic.ImportError_):
+                ic._classify_local_file(codex, "auto")
+
+    def test_peek_ignores_non_object_codex_payload_and_claude_message(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex = root / "rollout-peek.jsonl"
+            codex.write_text(json.dumps({"payload": []}), encoding="utf-8")
+            self.assertEqual(ic._peek("codex", codex), (None, None, ""))
+            claude = root / "peek-claude.jsonl"
+            claude.write_text(json.dumps({"type": "user", "message": []}), encoding="utf-8")
+            self.assertEqual(ic._peek("claude", claude), (None, None, ""))
+
     def test_claude_excludes_internal_records_not_marker_mentions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "c.jsonl"
@@ -625,6 +672,28 @@ class CliTests(unittest.TestCase):
             ic.write_conversation(conv, {}, out)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
         self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+
+    def test_output_root_and_state_symlinks_are_rejected_without_touching_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            external_dir = root / "external-dir"
+            external_dir.mkdir()
+            os.chmod(external_dir, 0o755)
+            linked_root = root / "linked-root"
+            linked_root.symlink_to(external_dir, target_is_directory=True)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录是符号链接"):
+                ic.load_imported(linked_root)
+            self.assertEqual(os.stat(external_dir).st_mode & 0o777, 0o755)
+            out = root / "out"
+            out.mkdir()
+            sentinel = root / "state-sentinel"
+            sentinel.write_text("state", encoding="utf-8")
+            os.chmod(sentinel, 0o644)
+            ic.imported_path(out).symlink_to(sentinel)
+            with self.assertRaisesRegex(ic.ImportError_, "状态文件是符号链接"):
+                ic.load_imported(out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "state")
+            self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
 
     def test_collision_cli_reports_only_successful_outputs_and_partial_exit(self) -> None:
         def conversation(cid: str, mid: str) -> dict:

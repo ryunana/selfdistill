@@ -264,6 +264,33 @@ def parse_chatgpt(path: Path) -> tuple:
                 skipped.append((f.name, "会话条目结构损坏"))
                 continue
             mapping = conv.get("mapping") or {}
+            if not isinstance(mapping, dict):
+                skipped.append((conv.get("title") or conv.get("id") or f.name, "会话 mapping 不是对象"))
+                continue
+            if any(not isinstance(node, dict) for node in mapping.values()):
+                skipped.append((conv.get("title") or conv.get("id") or f.name, "会话 mapping 节点不是对象"))
+                continue
+            malformed = False
+            for node in mapping.values():
+                msg = node.get("message")
+                if msg is not None and not isinstance(msg, dict):
+                    malformed = True
+                    break
+                if isinstance(msg, dict):
+                    for name in ("author", "content"):
+                        value = msg.get(name)
+                        if value is not None and not isinstance(value, dict):
+                            malformed = True
+                            break
+                    content = msg.get("content") if isinstance(msg.get("content"), dict) else None
+                    if content is not None and content.get("parts") is not None and not isinstance(content.get("parts"), list):
+                        malformed = True
+                        break
+                if malformed:
+                    break
+            if malformed:
+                skipped.append((conv.get("title") or conv.get("id") or f.name, "会话消息结构不是对象"))
+                continue
             current = conv.get("current_node")
             has_valid_current = bool(current and str(current) in mapping)
             try:
@@ -535,6 +562,36 @@ def parse_deepseek(path: Path) -> tuple:
             skipped.append(("conversations.json", "会话条目结构损坏"))
             continue
         mapping = conv.get("mapping") or {}
+        if not isinstance(mapping, dict) or any(not isinstance(node, dict) for node in mapping.values()):
+            skipped.append((conv.get("title") or conv.get("id") or "?", "会话 mapping 结构损坏"))
+            continue
+        malformed = False
+        for node in mapping.values():
+            msg = node.get("message")
+            if msg is not None and not isinstance(msg, dict):
+                malformed = True
+                break
+            if isinstance(msg, dict):
+                fragments = msg.get("fragments")
+                if fragments is not None and not isinstance(fragments, list):
+                    malformed = True
+                    break
+                if isinstance(fragments, list):
+                    for fragment in fragments:
+                        if not isinstance(fragment, dict):
+                            malformed = True
+                            break
+                        if fragment.get("type") == "FILE":
+                            files = fragment.get("files")
+                            if files is not None and (not isinstance(files, list)
+                                                      or any(not isinstance(item, dict) for item in files)):
+                                malformed = True
+                                break
+                if malformed:
+                    break
+        if malformed:
+            skipped.append((conv.get("title") or conv.get("id") or "?", "会话消息结构损坏"))
+            continue
         try:
             paths = _root_to_leaf_paths(mapping)
         except ImportError_ as e:
@@ -639,6 +696,11 @@ def _clean_codex_user(text: str, events: Optional[list[str]] = None) -> str:
         if text == before:
             break
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if (re.match(r"^<(?:environment_context|recommended_plugins|heartbeat|in-app-browser-context|skills_instructions|plugins_instructions|apps_instructions|permissions_instructions)\b", first, re.I)
+            or re.match(r"^#\s*AGENTS\.md instructions\b", first, re.I)):
+        if events is not None:
+            events.append("内部内容已排除：Codex 残留未闭合系统包装")
+        return ""
     if first in _CODEX_PREFIX_RECORDS:
         if events is not None:
             events.append("内部内容已排除：Codex 前置文件或浏览器上下文")
@@ -687,8 +749,11 @@ def _codex_session_id(path: Path) -> str:
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(d, dict):
+                    continue
                 if d.get("type") == "session_meta":
-                    pid = (d.get("payload") or {}).get("id")
+                    payload = d.get("payload")
+                    pid = payload.get("id") if isinstance(payload, dict) else None
                     if pid:
                         return str(pid)
                 break
@@ -715,15 +780,33 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
                 if events is not None:
                     events.append(f"损坏 JSONL 行：Codex 第 {i} 行")
                 continue
+            if not isinstance(d, dict):
+                if events is not None:
+                    events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行")
+                continue
             if d.get("type") != "response_item":
                 continue
-            payload = d.get("payload") or {}
+            raw_payload = d.get("payload")
+            if raw_payload is not None and not isinstance(raw_payload, dict):
+                if events is not None:
+                    events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 payload 不是对象")
+                continue
+            payload = raw_payload or {}
+            if not isinstance(payload, dict):
+                if events is not None:
+                    events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 payload 不是对象")
+                continue
             if payload.get("type") != "message":
                 continue
             role = str(payload.get("role") or "").lower()
             if role not in ("user", "assistant"):
                 continue
-            text = _codex_text_with_events(payload.get("content"), events)
+            content = payload.get("content")
+            if content is not None and not isinstance(content, list):
+                if events is not None:
+                    events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 content 不是列表")
+                continue
+            text = _codex_text_with_events(content, events)
             if role == "user":
                 text = _clean_codex_user(text, events)
             if not text:
@@ -810,6 +893,10 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                 if events is not None:
                     events.append(f"损坏 JSONL 行：Claude 第 {i} 行")
                 continue
+            if not isinstance(d, dict):
+                if events is not None:
+                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行")
+                continue
             if d.get("isMeta") is True:
                 if events is not None:
                     events.append("内部内容已排除：Claude isMeta")
@@ -825,11 +912,24 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                     else:
                         events.append(f"未知内部记录告警：Claude type={d.get('type') or '?'}")
                 continue
-            m = d.get("message") or {}
+            raw_message = d.get("message")
+            if raw_message is not None and not isinstance(raw_message, dict):
+                if events is not None:
+                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 message 不是对象")
+                continue
+            m = raw_message or {}
+            if not isinstance(m, dict):
+                if events is not None:
+                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 message 不是对象")
+                continue
             role = str(m.get("role") or d.get("type")).lower()
             if role not in ("user", "assistant"):
                 continue
             content = m.get("content")
+            if content is not None and not isinstance(content, (str, list)):
+                if events is not None:
+                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 content 结构无效")
+                continue
             text, content_handled = _claude_content_text(content, events)
             if role == "user":
                 if re.match(r"^claude(?:\s+--?[\w-]+(?:\s+\S+)?)*\s*$", text):
@@ -890,7 +990,15 @@ def imported_path(out_dir: Path) -> Path:
     return out_dir / ".imported.json"
 
 
+def _assert_safe_output_root(out_dir: Path) -> None:
+    if out_dir.is_symlink():
+        raise ImportError_(f"输出根目录是符号链接，拒绝访问：{out_dir}")
+    if imported_path(out_dir).is_symlink():
+        raise ImportError_(f"状态文件是符号链接，拒绝访问：{imported_path(out_dir)}")
+
+
 def load_imported(out_dir: Path) -> dict:
+    _assert_safe_output_root(out_dir)
     p = imported_path(out_dir)
     if p.exists():
         try:
@@ -921,6 +1029,7 @@ def load_imported(out_dir: Path) -> dict:
 
 
 def save_imported(imported: dict, out_dir: Path) -> None:
+    _assert_safe_output_root(out_dir)
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(out_dir, 0o700)
     _atomic_write(imported_path(out_dir), json.dumps(imported, ensure_ascii=False, indent=2) + "\n")
@@ -993,6 +1102,7 @@ def _claim_dry_run_output(conv: tuple, imported: dict, out_dir: Path) -> None:
 def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool = False) -> str:
     """Markdown is the source of truth; state is reconstructed from its final block."""
     source, cid, title, exported_at, msgs = conv
+    _assert_safe_output_root(out_dir)
     key = f"{source}:{cid}"
     ids = [m[2] for m in msgs]
     if len(ids) != len(set(ids)):
@@ -1094,6 +1204,8 @@ def _peek(source: str, path: Path) -> tuple:
             d = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(d, dict):
+            continue
         ts = d.get("timestamp")
         if ts:
             ft = fmt_time(ts)
@@ -1102,7 +1214,9 @@ def _peek(source: str, path: Path) -> tuple:
             if ft:
                 last_t = ft
         if source == "codex":
-            payload = d.get("payload") or {}
+            payload = d.get("payload")
+            if not isinstance(payload, dict):
+                continue
             if payload.get("type") == "message" and payload.get("role") == "user" and not title:
                 for c in payload.get("content") or []:
                     if isinstance(c, dict) and c.get("type") == "input_text" and c.get("text"):
@@ -1112,7 +1226,9 @@ def _peek(source: str, path: Path) -> tuple:
                         break
         elif source == "claude":
             if d.get("type") == "user" and not title:
-                m = d.get("message") or {}
+                m = d.get("message")
+                if not isinstance(m, dict):
+                    continue
                 content = m.get("content")
                 if isinstance(content, str):
                     t = content.strip()
@@ -1282,6 +1398,8 @@ def _classify_local_file(path: Path, forced: str) -> str:
                 if not line.strip():
                     continue
                 record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ImportError_("无法识别本地 JSONL：记录不是对象")
                 if record.get("type") in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
                     continue
                 if record.get("type") == "session_meta" or "payload" in record:
