@@ -1,0 +1,4 @@
+{"type": "mode", "mode": "normal", "sessionId": "fake-claude-session-001"}
+{"type": "user", "sessionId": "fake-claude-session-001", "uuid": "cu1", "timestamp": "2026-08-01T11:00:00.000Z", "message": {"role": "user", "content": "[SIMULATED] 分析这份数据的趋势"}}
+{"type": "assistant", "sessionId": "fake-claude-session-001", "uuid": "ca1", "timestamp": "2026-08-01T11:00:10.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "[SIMULATED] 数据整体呈上升趋势。"}]}}
+{"type": "user", "sessionId": "fake-claude-session-001", "uuid": "cu2", "timestamp": "2026-08-01T11:01:00.000Z", "message": {"role": "user", "content": "claude --resume fake-claude-session-001"}}

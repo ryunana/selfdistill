@@ -92,12 +92,23 @@ L3 始终逐条确认；L1/L2/L4 中描述个人的内容，以及敏感、高�
 
 ## 导入来源
 
-| 来源 | 导出入口速查 | 整理细则 |
+**自动导入器**（推荐）：导出文件直接交给 `import_chats.py`，本地会话自动发现（先 dry-run 清单、确认后写入）：
+
+```bash
+python3 import_chats.py --source chatgpt  --path <导出目录>
+python3 import_chats.py --source gemini   --path <Takeout 解压目录>
+python3 import_chats.py --source deepseek --path <conversations.json 或 zip>
+python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--dry-run]
+```
+
+| 来源 | 导出入口速查 | 自动导入 |
 |------|--------------|----------|
-| ChatGPT 网页 | 左下角头像 → 设置 → **数据管理** → 导出数据；解压后得到 `conversations-*.json` → 放入 `input/` | [docs/intake.md](docs/intake.md) |
-| Gemini 网页 | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` → 按会话整理入 `input/` | [docs/intake.md](docs/intake.md) |
-| DeepSeek 网页 | 左下角头像 → **系统设置** → **数据管理** → **导出所有历史对话** → 按会话整理入 `input/` | [docs/intake.md](docs/intake.md) |
-| 本机 Codex / Claude Code | 记录保存在本机目录；交给正在使用的 AI 协助整理成统一格式 → 放入 `input/` | [docs/intake.md](docs/intake.md) |
+| ChatGPT 网页 | 左下角头像 → 设置 → **数据管理** → 导出数据；解压后得到 `conversations-*.json` | `--source chatgpt` |
+| Gemini 网页 | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` | `--source gemini` |
+| DeepSeek 网页 | 左下角头像 → **系统设置** → **数据管理** → **导出所有历史对话** | `--source deepseek` |
+| 本机 Codex / Claude Code | 会话保存在 `~/.codex/sessions`、`~/.claude/projects` | `--source local`（自动发现） |
+
+详细格式与手工整理 fallback 见 [docs/intake.md](docs/intake.md)。
 
 ## 产出与写回目标
 

@@ -92,12 +92,23 @@ L3 is always confirmed item by item; personal content in L1/L2/L4, as well as se
 
 ## Import Sources
 
-| Source | Export entry (quick reference) | Details |
-|--------|-------------------------------|---------|
-| ChatGPT web | Avatar (bottom-left) → Settings → **Data management** → Export data; unzip to get `conversations-*.json` → put into `input/` | [docs/intake.md](docs/intake.md) |
-| Gemini web | Google Takeout → My Activity → **Gemini Apps** → Export; unzip to get `我的活动记录.html` → organize into `input/` | [docs/intake.md](docs/intake.md) |
-| DeepSeek web | Avatar (bottom-left) → **System settings** → **Data management** → **Export all chat history** → organize into `input/` | [docs/intake.md](docs/intake.md) |
-| Local Codex / Claude Code | Records live in local directories; ask the AI you're using to help normalize them → put into `input/` | [docs/intake.md](docs/intake.md) |
+**Auto importer** (recommended): feed export files to `import_chats.py`; local sessions are discovered automatically (dry-run list first, then confirmed writes):
+
+```bash
+python3 import_chats.py --source chatgpt  --path <export dir>
+python3 import_chats.py --source gemini   --path <Takeout dir>
+python3 import_chats.py --source deepseek --path <conversations.json or zip>
+python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--dry-run]
+```
+
+| Source | Export entry (quick reference) | Auto import |
+|--------|-------------------------------|-------------|
+| ChatGPT web | Avatar (bottom-left) → Settings → **Data management** → Export data; unzip to get `conversations-*.json` | `--source chatgpt` |
+| Gemini web | Google Takeout → My Activity → **Gemini Apps** → Export; unzip to get `我的活动记录.html` | `--source gemini` |
+| DeepSeek web | Avatar (bottom-left) → **System settings** → **Data management** → **Export all chat history** | `--source deepseek` |
+| Local Codex / Claude Code | Sessions live in `~/.codex/sessions`, `~/.claude/projects` | `--source local` (auto-discovery) |
+
+Full format details and the manual fallback live in [docs/intake.md](docs/intake.md).
 
 ## Outputs & Write-back Targets
 

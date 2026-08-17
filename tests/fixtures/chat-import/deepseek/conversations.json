@@ -1,0 +1,64 @@
+[
+  {
+    "id": "deepseek-conv-001",
+    "title": "虚构聊天：周末徒步路线",
+    "inserted_at": "2026-08-01T09:00:00.000000+08:00",
+    "updated_at": "2026-08-01T09:05:00.000000+08:00",
+    "mapping": {
+      "1": {
+        "id": "1",
+        "parent": "root",
+        "children": [
+          "2"
+        ],
+        "message": {
+          "model": "deepseek-chat",
+          "inserted_at": "2026-08-01T09:00:00.000000+08:00",
+          "fragments": [
+            {
+              "type": "REQUEST",
+              "content": "[SIMULATED] 推荐一条北京周边一日徒步路线"
+            }
+          ]
+        }
+      },
+      "2": {
+        "id": "2",
+        "parent": "1",
+        "children": [],
+        "message": {
+          "model": "deepseek-chat",
+          "inserted_at": "2026-08-01T09:00:30.000000+08:00",
+          "fragments": [
+            {
+              "type": "THINK",
+              "content": "[SIMULATED] 用户想要一条适合新手的路线"
+            },
+            {
+              "type": "RESPONSE",
+              "content": "[SIMULATED] 推荐香山—植物园环线，约 8 公里。"
+            },
+            {
+              "type": "FILE",
+              "files": [
+                {
+                  "file_id": "f1",
+                  "file_name": "trail-map.png",
+                  "file_size": 12345
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "root": {
+        "id": "root",
+        "parent": null,
+        "children": [
+          "1"
+        ],
+        "message": null
+      }
+    }
+  }
+]
