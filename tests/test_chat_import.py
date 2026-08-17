@@ -62,7 +62,9 @@ class ParserTests(unittest.TestCase):
             self.assertIn("[未识别附件]", user_text)
             self.assertNotIn("asset_pointer", user_text)
             self.assertNotIn("{'", user_text)
-            self.assertTrue(any("未识别附件" in reason for _ref, reason in skipped))
+            reasons = [reason for _ref, reason in skipped if "未识别 ChatGPT 附件" in reason]
+            self.assertTrue(reasons)
+            self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
 
     def test_chatgpt_branch_excluded(self) -> None:
         convs, skipped, total = ic.parse_chatgpt(FIXTURE / "chatgpt")
@@ -141,6 +143,21 @@ class ParserTests(unittest.TestCase):
             convs, skipped, total = ic.parse_deepseek(p)
             self.assertEqual(len(convs), 1)
             self.assertIn("工具片段 2 条", skipped[0][1])
+
+    def test_deepseek_mixed_visible_roles_in_one_node_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations.json"
+            p.write_text(json.dumps([{"id": "mixed", "mapping": {
+                "m": {"parent": None, "children": [], "message": {"fragments": [
+                    {"type": "REQUEST", "content": "user text"},
+                    {"type": "RESPONSE", "content": "assistant text"},
+                ]}},
+            }}]), encoding="utf-8")
+            convs, skipped, total = ic.parse_deepseek(p)
+            self.assertEqual((total, convs), (1, []))
+            reasons = [reason for _ref, reason in skipped if "混合 REQUEST/RESPONSE" in reason]
+            self.assertTrue(reasons)
+            self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
 
     def test_deepseek_nested_file_metadata_is_not_stringified(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -385,6 +402,30 @@ class ParserTests(unittest.TestCase):
             claude = root / "peek-claude.jsonl"
             claude.write_text(json.dumps({"type": "user", "message": []}), encoding="utf-8")
             self.assertEqual(ic._peek("claude", claude), (None, None, ""))
+
+    def test_preview_and_codex_session_id_never_stringify_nested_values(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex = root / "rollout-fallback.jsonl"
+            codex.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "session_meta", "payload": {"id": {"secret_key": "secret_value"}}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": {"secret_key": "secret_value"}},
+                ]}},
+            ]), encoding="utf-8")
+            _first, _last, title = ic._peek("codex", codex)
+            self.assertEqual(title, "")
+            self.assertEqual(ic._codex_session_id(codex), "fallback")
+
+            claude = root / "claude-preview.jsonl"
+            claude.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": ["secret_key", "secret_value"]},
+                {"type": "text", "text": {"secret_key": "secret_value"}},
+            ]}}), encoding="utf-8")
+            _first, _last, title = ic._peek("claude", claude)
+            self.assertEqual(title, "")
+            self.assertNotIn("secret_key", title)
+            self.assertNotIn("secret_value", title)
 
     def test_claude_excludes_internal_records_not_marker_mentions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1137,6 +1178,57 @@ class CliTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("原始 2 个会话，输出 1 个会话", r.stdout)
         self.assertIn("附件元数据结构损坏", r.stdout)
+
+    def test_chatgpt_unknown_part_is_partial_cli_failure(self) -> None:
+        def conversation(cid: str, part) -> dict:
+            return {"id": cid, "title": cid, "current_node": "m", "mapping": {
+                "m": {"parent": None, "children": [], "message": {
+                    "id": "m", "author": {"role": "user"}, "create_time": 1,
+                    "content": {"parts": [part]},
+                }},
+            }}
+        with tempfile.TemporaryDirectory() as td:
+            export = Path(td) / "conversations-000.json"
+            export.write_text(json.dumps([conversation("good", "visible"),
+                                          conversation("unknown", {"opaque": 1})]), encoding="utf-8")
+            r = run_import("--source", "chatgpt", "--path", str(export),
+                           "--root", str(Path(td) / "out"), "--yes")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("原始 2 个会话，输出 2 个会话", r.stdout)
+        self.assertIn("未识别 ChatGPT 附件", r.stdout)
+
+    def test_utf8_decode_failures_are_strict_and_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            gemini = root / "我的活动记录.html"
+            gemini.write_bytes(b"\xff")
+            with self.assertRaisesRegex(ic.ImportError_, "Gemini HTML UTF-8 解码失败"):
+                ic.parse_gemini(gemini)
+            r = run_import("--source", "gemini", "--path", str(gemini),
+                           "--root", str(root / "gemini-out"), "--yes")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("UTF-8", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+
+            for source, parser in (("codex", ic.parse_codex), ("claude", ic.parse_claude)):
+                with self.subTest(source=source):
+                    session = root / f"{source}.jsonl"
+                    session.write_bytes(b"\xff\n")
+                    with self.assertRaisesRegex(ic.ImportError_, "UTF-8 解码失败"):
+                        parser(session, [])
+                    forced = run_import("--source", "local", "--path", str(session),
+                                        "--local-format", source, "--root", str(root / f"{source}-out"),
+                                        "--dry-run", "--yes")
+                    self.assertEqual(forced.returncode, 1, forced.stdout + forced.stderr)
+                    self.assertIn("UTF-8", forced.stdout)
+                    self.assertNotIn("Traceback", forced.stderr)
+
+            auto = run_import("--source", "local", "--path", str(root / "codex.jsonl"),
+                              "--local-format", "auto", "--root", str(root / "auto-out"),
+                              "--dry-run", "--yes")
+            self.assertEqual(auto.returncode, 1, auto.stdout + auto.stderr)
+            self.assertIn("无法识别本地 JSONL", auto.stdout)
+            self.assertNotIn("Traceback", auto.stderr)
 
     def test_local_dry_run_fixture_roots(self) -> None:
         codex_root = FIXTURE / "codex" / "sessions"

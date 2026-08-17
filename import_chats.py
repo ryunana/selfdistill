@@ -340,7 +340,7 @@ def parse_chatgpt(path: Path) -> tuple:
                     title += f"（分支 {index}）"
                 convs.append(_make_conversation("chatgpt", cid, title, msgs))
                 if unknown_parts:
-                    skipped.append((cid, f"内部内容已排除：未识别附件 {unknown_parts} 个"))
+                    skipped.append((cid, f"未识别 ChatGPT 附件 {unknown_parts} 个"))
                 if excluded_internal:
                     skipped.append((cid, f"内部内容已排除：ChatGPT reasoning {excluded_internal} 个"))
     return convs, skipped, total
@@ -471,7 +471,9 @@ def parse_gemini(path: Path) -> tuple:
         raise ImportError_(f"未找到 我的活动记录.html：{path}")
     try:
         parser = _GeminiActivityExtractor()
-        parser.feed(target.read_text(encoding="utf-8", errors="replace"))
+        parser.feed(target.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        raise ImportError_(f"Gemini HTML UTF-8 解码失败：{target.name}")
     except OSError as e:
         raise ImportError_(f"无法读取 {target}：{e}")
     if not parser.blocks:
@@ -603,6 +605,7 @@ def parse_deepseek(path: Path) -> tuple:
                     malformed_reason = "会话消息结构损坏"
                     break
                 if isinstance(fragments, list):
+                    visible_roles: set[str] = set()
                     for fragment in fragments:
                         if not isinstance(fragment, dict):
                             malformed_reason = "会话消息结构损坏"
@@ -616,6 +619,8 @@ def parse_deepseek(path: Path) -> tuple:
                             if content is not None and not isinstance(content, str):
                                 malformed_reason = f"会话片段 {ftype} content 不是字符串"
                                 break
+                            if ftype in ("REQUEST", "RESPONSE") and isinstance(content, str) and content.strip():
+                                visible_roles.add(ftype)
                         if ftype == "FILE":
                             files = fragment.get("files")
                             if files is not None and (not isinstance(files, list)
@@ -629,6 +634,8 @@ def parse_deepseek(path: Path) -> tuple:
                                     break
                         if malformed_reason:
                             break
+                    if not malformed_reason and len(visible_roles) > 1:
+                        malformed_reason = "会话节点混合 REQUEST/RESPONSE 可见内容"
                 if malformed_reason:
                     break
         if malformed_reason:
@@ -850,7 +857,7 @@ def _codex_text_with_events(content, events: Optional[list[str]]) -> str:
 
 def _codex_session_id(path: Path) -> str:
     try:
-        with path.open(encoding="utf-8", errors="replace") as fh:
+        with path.open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -864,10 +871,10 @@ def _codex_session_id(path: Path) -> str:
                 if d.get("type") == "session_meta":
                     payload = d.get("payload")
                     pid = payload.get("id") if isinstance(payload, dict) else None
-                    if pid:
+                    if isinstance(pid, (str, int, float)) and not isinstance(pid, bool) and str(pid).strip():
                         return str(pid)
                 break
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return path.stem.removeprefix("rollout-") or path.stem
 
@@ -879,51 +886,54 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
         fh = path.open(encoding="utf-8")
     except OSError as e:
         raise ImportError_(f"无法读取 {path}：{e}")
-    with fh:
-        for i, line in enumerate(fh, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                if events is not None:
-                    events.append(f"损坏 JSONL 行：Codex 第 {i} 行")
-                continue
-            if not isinstance(d, dict):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行")
-                continue
-            if d.get("type") != "response_item":
-                continue
-            raw_payload = d.get("payload")
-            if raw_payload is not None and not isinstance(raw_payload, dict):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 payload 不是对象")
-                continue
-            payload = raw_payload or {}
-            if not isinstance(payload, dict):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 payload 不是对象")
-                continue
-            if payload.get("type") != "message":
-                continue
-            role = str(payload.get("role") or "").lower()
-            if role not in ("user", "assistant"):
-                continue
-            content = payload.get("content")
-            if content is not None and not isinstance(content, list):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 content 不是列表")
-                continue
-            text = _codex_text_with_events(content, events)
-            if role == "user":
-                text = _clean_codex_user(text, events)
-            if not text:
-                continue
-            mid = (str(payload.get("id") or "")
-                   or _occurrence_id(role, d.get("timestamp"), i, text))
-            msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
+    try:
+        with fh:
+            for i, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    if events is not None:
+                        events.append(f"损坏 JSONL 行：Codex 第 {i} 行")
+                    continue
+                if not isinstance(d, dict):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行")
+                    continue
+                if d.get("type") != "response_item":
+                    continue
+                raw_payload = d.get("payload")
+                if raw_payload is not None and not isinstance(raw_payload, dict):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 payload 不是对象")
+                    continue
+                payload = raw_payload or {}
+                if not isinstance(payload, dict):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 payload 不是对象")
+                    continue
+                if payload.get("type") != "message":
+                    continue
+                role = str(payload.get("role") or "").lower()
+                if role not in ("user", "assistant"):
+                    continue
+                content = payload.get("content")
+                if content is not None and not isinstance(content, list):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：Codex 第 {i} 行 content 不是列表")
+                    continue
+                text = _codex_text_with_events(content, events)
+                if role == "user":
+                    text = _clean_codex_user(text, events)
+                if not text:
+                    continue
+                mid = (str(payload.get("id") or "")
+                       or _occurrence_id(role, d.get("timestamp"), i, text))
+                msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
+    except UnicodeDecodeError:
+        raise ImportError_(f"Codex JSONL UTF-8 解码失败：{path.name}")
     if not msgs:
         return None
     title = _first_user_snippet(msgs) or path.stem
@@ -995,76 +1005,79 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
         fh = path.open(encoding="utf-8")
     except OSError as e:
         raise ImportError_(f"无法读取 {path}：{e}")
-    with fh:
-        for i, line in enumerate(fh, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                if events is not None:
-                    events.append(f"损坏 JSONL 行：Claude 第 {i} 行")
-                continue
-            if not isinstance(d, dict):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行")
-                continue
-            if d.get("isMeta") is True:
-                if events is not None:
-                    events.append("内部内容已排除：Claude isMeta")
-                continue
-            if d.get("isSidechain") is True:
-                if events is not None:
-                    events.append("内部内容已排除：Claude isSidechain")
-                continue
-            dtype = d.get("type")
-            if not isinstance(dtype, str):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 type 不是字符串")
-                continue
-            if dtype not in ("user", "assistant"):
-                if events is not None:
-                    if dtype in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
-                        events.append("内部内容已排除：Claude 已知非消息记录")
-                    else:
-                        events.append(f"未知内部记录告警：Claude type={d.get('type') or '?'}")
-                continue
-            raw_message = d.get("message")
-            if raw_message is not None and not isinstance(raw_message, dict):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 message 不是对象")
-                continue
-            m = raw_message or {}
-            if not isinstance(m, dict):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 message 不是对象")
-                continue
-            role = str(m.get("role") or d.get("type")).lower()
-            if role not in ("user", "assistant"):
-                continue
-            content = m.get("content")
-            if content is not None and not isinstance(content, (str, list)):
-                if events is not None:
-                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 content 结构无效")
-                continue
-            text, content_handled = _claude_content_text(content, events)
-            if role == "user":
-                if re.match(r"^claude(?:\s+--?[\w-]+(?:\s+\S+)?)*\s*$", text):
+    try:
+        with fh:
+            for i, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
                     if events is not None:
-                        events.append("内部内容已排除：Claude CLI/resume")
-                    continue  # CLI 调用/resume 行，不是真实内容
-                if _is_claude_internal_user_record(text):
+                        events.append(f"损坏 JSONL 行：Claude 第 {i} 行")
+                    continue
+                if not isinstance(d, dict):
                     if events is not None:
-                        events.append("内部内容已排除：Claude 命令或任务通知")
-                    continue  # known whole-record internal notification
-            if not text:
-                if content is not None and not content_handled and events is not None:
-                    events.append("未知内部记录告警：Claude 未识别消息内容")
-                continue
-            mid = (str(d.get("uuid") or "")
-                   or _occurrence_id(role, d.get("timestamp"), i, text))
-            msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
+                        events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行")
+                    continue
+                if d.get("isMeta") is True:
+                    if events is not None:
+                        events.append("内部内容已排除：Claude isMeta")
+                    continue
+                if d.get("isSidechain") is True:
+                    if events is not None:
+                        events.append("内部内容已排除：Claude isSidechain")
+                    continue
+                dtype = d.get("type")
+                if not isinstance(dtype, str):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 type 不是字符串")
+                    continue
+                if dtype not in ("user", "assistant"):
+                    if events is not None:
+                        if dtype in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
+                            events.append("内部内容已排除：Claude 已知非消息记录")
+                        else:
+                            events.append(f"未知内部记录告警：Claude type={d.get('type') or '?'}")
+                    continue
+                raw_message = d.get("message")
+                if raw_message is not None and not isinstance(raw_message, dict):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 message 不是对象")
+                    continue
+                m = raw_message or {}
+                if not isinstance(m, dict):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 message 不是对象")
+                    continue
+                role = str(m.get("role") or d.get("type")).lower()
+                if role not in ("user", "assistant"):
+                    continue
+                content = m.get("content")
+                if content is not None and not isinstance(content, (str, list)):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 content 结构无效")
+                    continue
+                text, content_handled = _claude_content_text(content, events)
+                if role == "user":
+                    if re.match(r"^claude(?:\s+--?[\w-]+(?:\s+\S+)?)*\s*$", text):
+                        if events is not None:
+                            events.append("内部内容已排除：Claude CLI/resume")
+                        continue  # CLI 调用/resume 行，不是真实内容
+                    if _is_claude_internal_user_record(text):
+                        if events is not None:
+                            events.append("内部内容已排除：Claude 命令或任务通知")
+                        continue  # known whole-record internal notification
+                if not text:
+                    if content is not None and not content_handled and events is not None:
+                        events.append("未知内部记录告警：Claude 未识别消息内容")
+                    continue
+                mid = (str(d.get("uuid") or "")
+                       or _occurrence_id(role, d.get("timestamp"), i, text))
+                msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
+    except UnicodeDecodeError:
+        raise ImportError_(f"Claude JSONL UTF-8 解码失败：{path.name}")
     if not msgs:
         return None
     title = _first_user_snippet(msgs) or path.stem
@@ -1290,8 +1303,8 @@ def _build_content(source: str, cid: str, title: str, exported_at: str, msgs: li
 
 # ---------- 本地主动发现 ----------
 
-def discover_local(since: Optional[str] = None, excludes: tuple = (),
-                   roots: tuple = LOCAL_ROOTS) -> list:
+def discover_local(since: Optional[str] = None, excludes: tuple = (), roots: tuple = LOCAL_ROOTS,
+                   failures: Optional[list[tuple[str, str]]] = None) -> list:
     found = []
     for source, root_glob, pattern in roots:
         root = Path(os.path.expanduser(root_glob))
@@ -1307,7 +1320,12 @@ def discover_local(since: Optional[str] = None, excludes: tuple = (),
                 continue
             if size == 0:
                 continue
-            first_t, last_t, title = _peek(source, p)
+            try:
+                first_t, last_t, title = _peek(source, p)
+            except ImportError_ as e:
+                if failures is not None:
+                    failures.append((p.name, str(e)))
+                continue
             if since and (last_t or first_t or "") < since:
                 continue
             found.append((source, _session_id(source, p), title, first_t, last_t, size, str(p)))
@@ -1327,7 +1345,7 @@ def _peek(source: str, path: Path) -> tuple:
     head_lines: list[str] = []
     tail_lines: list[str] = []
     try:
-        with path.open(encoding="utf-8", errors="replace") as fh:
+        with path.open(encoding="utf-8") as fh:
             for i, line in enumerate(fh):
                 if i < 60:
                     head_lines.append(line)
@@ -1335,6 +1353,8 @@ def _peek(source: str, path: Path) -> tuple:
                     tail_lines.append(line)
                     if len(tail_lines) > 30:
                         tail_lines.pop(0)
+    except UnicodeDecodeError:
+        raise ImportError_(f"本地 JSONL UTF-8 解码失败：{path.name}")
     except OSError:
         pass
     for line in head_lines + tail_lines:
@@ -1359,9 +1379,13 @@ def _peek(source: str, path: Path) -> tuple:
             if not isinstance(payload, dict):
                 continue
             if payload.get("type") == "message" and payload.get("role") == "user" and not title:
-                for c in payload.get("content") or []:
-                    if isinstance(c, dict) and c.get("type") == "input_text" and c.get("text"):
-                        t = _clean_codex_user(str(c["text"])).replace("\n", " ").strip()
+                content = payload.get("content")
+                if not isinstance(content, list):
+                    continue
+                for c in content:
+                    if (isinstance(c, dict) and c.get("type") == "input_text"
+                            and isinstance(c.get("text"), str) and c["text"]):
+                        t = _clean_codex_user(c["text"]).replace("\n", " ").strip()
                         if t:
                             title = t[:40] + ("…" if len(t) > 40 else "")
                         break
@@ -1374,8 +1398,9 @@ def _peek(source: str, path: Path) -> tuple:
                 if isinstance(content, str):
                     t = content.strip()
                 elif isinstance(content, list):
-                    t = " ".join(str(c.get("text", "")) for c in content
-                                 if isinstance(c, dict) and c.get("type") == "text").strip()
+                    t = " ".join(c["text"] for c in content
+                                 if isinstance(c, dict) and c.get("type") == "text"
+                                 and isinstance(c.get("text"), str)).strip()
                 else:
                     t = ""
                 if t and not re.match(r"^claude(?:\s+--?[\w-]+(?:\s+\S+)?)*\s*$", t):
@@ -1400,8 +1425,9 @@ def run_source(source: str, path_arg: Optional[str], args, imported: dict,
             found, discovery_failures = discover_local_path(Path(args.path), since, excludes, args.local_format)
             return run_local(found, args, imported, out_dir, discovery_failures)
         roots = LOCAL_ROOTS
-        found = discover_local(since, excludes, roots)
-        return run_local(found, args, imported, out_dir)
+        discovery_failures: list[tuple[str, str]] = []
+        found = discover_local(since, excludes, roots, discovery_failures)
+        return run_local(found, args, imported, out_dir, discovery_failures)
     return import_convs(convs, skipped, total, imported, out_dir, dry_run=args.dry_run)
 
 
@@ -1534,7 +1560,7 @@ def _classify_local_file(path: Path, forced: str) -> str:
     if forced != "auto":
         return forced
     try:
-        with path.open(encoding="utf-8", errors="replace") as fh:
+        with path.open(encoding="utf-8") as fh:
             for line in fh:
                 if not line.strip():
                     continue
@@ -1550,7 +1576,7 @@ def _classify_local_file(path: Path, forced: str) -> str:
                     return "codex"
                 if dtype in ("user", "assistant", "mode") or "message" in record:
                     return "claude"
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ImportError_(f"无法识别本地 JSONL：{e}")
     raise ImportError_("无法自动识别本地 JSONL；请使用 --local-format codex 或 claude")
 
