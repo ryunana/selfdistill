@@ -925,6 +925,13 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
         raise ImportError_(f"文件名冲突：{key} 会覆盖现有会话 {old_sources[0]}:{old_cids[0]}")
 
 
+def _claim_dry_run_output(conv: tuple, imported: dict, out_dir: Path) -> None:
+    """Record an in-memory output claim so dry-run reports later collisions."""
+    source, cid, title, _exported_at, msgs = conv
+    path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
+    imported[f"{source}:{cid}"] = _state_entry(path, title, msgs)
+
+
 def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool = False) -> str:
     """Markdown is the source of truth; state is reconstructed from its final block."""
     source, cid, title, exported_at, msgs = conv
@@ -1093,11 +1100,7 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
             skipped.append((conv[1], f"写入失败：{e}"))
             continue
         if dry_run:
-            source, cid, title, _exported_at, msgs = conv
-            path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
-            # Keep only an in-memory claim: dry-run is write-free but must still
-            # report a second lossy filename in the same batch as a failure.
-            imported[f"{source}:{cid}"] = _state_entry(path, title, msgs)
+            _claim_dry_run_output(conv, imported, out_dir)
         if result == "dup":
             dup += 1
         elif result == "update":
@@ -1106,7 +1109,7 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
             new += 1
     if not dry_run and (new or updated or dup):
         save_imported(imported, out_dir)
-    return (total, len(convs), new, updated, dup, skipped)
+    return (total, new + updated + dup, new, updated, dup, skipped)
 
 
 def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failures: Optional[list] = None) -> tuple:
@@ -1148,6 +1151,8 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
         except (OSError, UnicodeDecodeError, ImportError_) as e:
             bad.append((sid, f"写入失败：{e}"))
             continue
+        if args.dry_run:
+            _claim_dry_run_output(convs[0], imported, out_dir)
         if result == "dup":
             dup += 1
         elif result == "update":

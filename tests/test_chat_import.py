@@ -513,6 +513,25 @@ class CliTests(unittest.TestCase):
             ic.write_conversation(first, {}, unowned)
         self.assertEqual(unowned_path.read_text(encoding="utf-8"), original)
 
+    def test_collision_cli_reports_only_successful_outputs_and_partial_exit(self) -> None:
+        def conversation(cid: str, mid: str) -> dict:
+            return {"id": cid, "title": cid, "current_node": mid, "mapping": {
+                "root": {"parent": None, "children": [mid]},
+                mid: {"parent": "root", "children": [], "message": {
+                    "id": mid, "author": {"role": "user"}, "create_time": 1,
+                    "content": {"parts": ["正文"]},
+                }},
+            }}
+        with tempfile.TemporaryDirectory() as td:
+            export = Path(td) / "conversations-000.json"
+            export.write_text(json.dumps([conversation("a/b", "m1"), conversation("a?b", "m2")]),
+                              encoding="utf-8")
+            r = run_import("--source", "chatgpt", "--path", str(export),
+                           "--root", str(Path(td) / "out"), "--yes")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("原始 2 个会话，输出 1 个会话 → 新导入 1", r.stdout)
+        self.assertIn("解析/写入失败 1", r.stdout)
+
     def test_duplicate_restores_permissions_but_dry_run_is_write_free(self) -> None:
         out = self._tmp()
         conv = ("chatgpt", "private", "标题", "2026-08-01", [("user", None, "u", "正文")])
@@ -685,6 +704,24 @@ class CliTests(unittest.TestCase):
             self.assertIn("预计新导入 2", r.stdout)
             self.assertIn("解析/写入失败 1", r.stdout)
             self.assertFalse(out.exists())
+
+    def test_local_dry_run_claims_paths_and_reports_same_source_collisions(self) -> None:
+        out = self._tmp()
+        for source, parser_name in (("codex", "parse_codex"), ("claude", "parse_claude")):
+            with self.subTest(source=source):
+                first = (source, "a/b", "first", "2026-08-01", [("user", None, "u1", "one")])
+                second = (source, "a?b", "second", "2026-08-01", [("user", None, "u2", "two")])
+                found = [
+                    (source, "first-session", "first", None, None, 1, "first.jsonl"),
+                    (source, "second-session", "second", None, None, 1, "second.jsonl"),
+                ]
+                args = unittest.mock.Mock(yes=True, dry_run=True)
+                with unittest.mock.patch.object(ic, parser_name, side_effect=[[first], [second]]):
+                    total, outputs, new, updated, dup, bad = ic.run_local(found, args, {}, out)
+                self.assertEqual((total, outputs, new, updated, dup), (2, 1, 1, 0, 0))
+                self.assertEqual(len(bad), 1)
+                self.assertIn("文件名冲突", bad[0][1])
+        self.assertFalse(out.exists())
 
     def test_local_report_separates_expected_exclusions_from_bad_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as td:
