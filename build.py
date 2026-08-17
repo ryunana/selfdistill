@@ -640,14 +640,14 @@ def build_targets(l1: str, l2: str, l3: str, domains: list) -> None:
     (dsh / "persona.md").write_text(wrap(l1), encoding="utf-8")
     (dsh / "skills").mkdir(parents=True, exist_ok=True)
     for skill_name, description, text in [
-        ("selfstill-decision-logic", DSH_L2_DESCRIPTION, l2),
-        ("selfstill-user-profile", DSH_L3_DESCRIPTION, l3),
+        ("selfdistill-decision-logic", DSH_L2_DESCRIPTION, l2),
+        ("selfdistill-user-profile", DSH_L3_DESCRIPTION, l3),
     ]:
         (dsh / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
         (dsh / "skills" / skill_name / "SKILL.md").write_text(
             dsh_skill_content(skill_name, description, text), encoding="utf-8")
     for fid, text, desc in domains:
-        skill_name = f"selfstill-{fid}"
+        skill_name = f"selfdistill-{fid}"
         (dsh / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
         (dsh / "skills" / skill_name / "SKILL.md").write_text(
             dsh_skill_content(skill_name, desc, text), encoding="utf-8")

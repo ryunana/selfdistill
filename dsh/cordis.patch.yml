@@ -1,7 +1,7 @@
-# selfstill-dsh bundle patch：向组合挂载自身。
-# Cordis entry（index.mjs）在 apply 时把 selfstill 工作流注册为 DSH 运行时 skill。
+# selfdistill-dsh bundle patch：向组合挂载自身。
+# Cordis entry（index.mjs）在 apply 时把 selfdistill 工作流注册为 DSH 运行时 skill。
 # 安装（重启 web 生效）：
-#   dsh plugin --profile web add "github:ryunana/selfstill#<ref>&path:/dsh"
+#   dsh plugin --profile web add "github:ryunana/selfdistill#<ref>&path:/dsh"
 - insert:
-    - id: selfstill-dsh
-      name: 'selfstill-dsh'
+    - id: selfdistill-dsh
+      name: 'selfdistill-dsh'

@@ -127,16 +127,16 @@ class CollectPlansTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src = root / "dist" / "dsh"
-            (src / "skills" / "selfstill-x").mkdir(parents=True)
+            (src / "skills" / "selfdistill-x").mkdir(parents=True)
             (src / "persona.md").write_text(wrapped_persona("L1"), encoding="utf-8")
-            (src / "skills" / "selfstill-x" / "SKILL.md").write_text(
-                "---\nname: selfstill-x\n---\n\nbody\n", encoding="utf-8")
+            (src / "skills" / "selfdistill-x" / "SKILL.md").write_text(
+                "---\nname: selfdistill-x\n---\n\nbody\n", encoding="utf-8")
             with unittest.mock.patch.object(inst, "DIST", root / "dist"), \
                  unittest.mock.patch.object(inst, "DSH_HOME", root / "dsh-home"):
                 plans = inst.collect_plans("dsh")
             dests = {str(d) for _r, d, _e, _n in plans}
             self.assertIn(str(root / "dsh-home" / "cordis.patch.yml"), dests)
-            self.assertIn(str(root / "dsh-home" / "skills" / "selfstill-x" / "SKILL.md"), dests)
+            self.assertIn(str(root / "dsh-home" / "skills" / "selfdistill-x" / "SKILL.md"), dests)
 
 
 class EndToEndTests(unittest.TestCase):
@@ -156,9 +156,9 @@ class EndToEndTests(unittest.TestCase):
             patch = (dsh_home / "cordis.patch.yml").read_text(encoding="utf-8")
             self.assertIn("- id: system-prompt", patch)
             self.assertIn("# L1 协作契约", patch)
-            self.assertTrue((dsh_home / "skills" / "selfstill-decision-logic" / "SKILL.md").exists())
-            self.assertTrue((dsh_home / "skills" / "selfstill-agent-work" / "SKILL.md").exists())
-            self.assertTrue((dsh_home / "skills" / "selfstill-user-profile" / "SKILL.md").exists())
+            self.assertTrue((dsh_home / "skills" / "selfdistill-decision-logic" / "SKILL.md").exists())
+            self.assertTrue((dsh_home / "skills" / "selfdistill-agent-work" / "SKILL.md").exists())
+            self.assertTrue((dsh_home / "skills" / "selfdistill-user-profile" / "SKILL.md").exists())
             rerun = subprocess.run([sys.executable, "install.py", "--target", "dsh", "--yes"],
                                    cwd=str(repo), capture_output=True, text=True, env=env)
             self.assertEqual(rerun.returncode, 0, rerun.stderr)

@@ -1,7 +1,7 @@
 {
-  "name": "selfstill-dsh",
+  "name": "selfdistill-dsh",
   "version": "0.1.0",
-  "description": "DeepSeek Harness plugin for selfstill: distill AI chat history into an L1-L4 personal profile inside DSH.",
+  "description": "DeepSeek Harness plugin for selfdistill: distill AI chat history into an L1-L4 personal profile inside DSH.",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -21,13 +21,13 @@
   "keywords": [
     "dsh",
     "dsh-plugin",
-    "selfstill",
+    "selfdistill",
     "distillation",
     "personal-profile"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ryunana/selfstill.git",
+    "url": "git+https://github.com/ryunana/selfdistill.git",
     "directory": "dsh"
   },
   "license": "MIT"

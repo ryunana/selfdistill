@@ -12,7 +12,7 @@
 DSH 目标（--target dsh）：
 - persona（L1 协作契约）合并进 $DSH_HOME/cordis.patch.yml 的 system-prompt.persona；
 - L2/L3/L4 写成 $DSH_HOME/skills/<name>/SKILL.md（frontmatter 在顶部，按需加载）；
-- 目标 skill 文件已存在但无 distill 标记（非 selfstill 管理）时拒绝覆盖。
+- 目标 skill 文件已存在但无 distill 标记（非 selfdistill 管理）时拒绝覆盖。
 """
 import argparse
 import difflib
@@ -32,9 +32,9 @@ HOME = Path.home()
 DSH_HOME = Path(os.environ["DSH_HOME"]) if os.environ.get("DSH_HOME") else HOME / ".dsh"
 
 # DSH web profile 默认 persona 开场白（来自 dsh-web-app bundle patch，实测 rc.7）。
-# 若你的 DSH 已自定义 persona，可用 SELFSTILL_DSH_PERSONA_OPENER 覆盖本常量。
+# 若你的 DSH 已自定义 persona，可用 SELFDISTILL_DSH_PERSONA_OPENER 覆盖本常量。
 DEFAULT_PERSONA_OPENER = (
-    os.environ.get("SELFSTILL_DSH_PERSONA_OPENER")
+    os.environ.get("SELFDISTILL_DSH_PERSONA_OPENER")
     or "You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}."
 )
 
@@ -131,13 +131,13 @@ def merge_skill(existing: str, incoming: str) -> str:
     """DSH skill 文件合并：整文件替换，以 distill 标记为所有权判定。
 
     - 不存在：直接写入（incoming 自带 frontmatter + 标记）；
-    - 已有且含 distill 标记（selfstill 管理）：整文件替换（frontmatter 更新可传播）；
+    - 已有且含 distill 标记（selfdistill 管理）：整文件替换（frontmatter 更新可传播）；
     - 已有但无标记（其他工具/用户文件）：拒绝覆盖。
     """
     if not existing:
         return incoming
     if BEGIN not in existing:
-        raise InstallError(f"已有目标文件但不含 distill 标记（非 selfstill 管理），拒绝覆盖。")
+        raise InstallError(f"已有目标文件但不含 distill 标记（非 selfdistill 管理），拒绝覆盖。")
     return incoming
 
 

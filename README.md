@@ -89,13 +89,13 @@ python3 install.py --target dsh # 写入 $DSH_HOME（默认 ~/.dsh），先展�
 | 内容 | 写入位置 | 加载时机 |
 |------|----------|----------|
 | L1 协作契约 | `system-prompt.persona`（`$DSH_HOME/cordis.patch.yml`） | 每个新对话常驻（短、非敏感） |
-| L2 决策逻辑 | `~/.dsh/skills/selfstill-decision-logic/SKILL.md` | 按需加载 |
-| L3 个人事实 | `~/.dsh/skills/selfstill-user-profile/SKILL.md` | 按需加载；私密 L3 默认不写（`--include-private` 才包含） |
-| L4 领域打法 | `~/.dsh/skills/selfstill-<领域>/SKILL.md` | 按需加载 |
+| L2 决策逻辑 | `~/.dsh/skills/selfdistill-decision-logic/SKILL.md` | 按需加载 |
+| L3 个人事实 | `~/.dsh/skills/selfdistill-user-profile/SKILL.md` | 按需加载；私密 L3 默认不写（`--include-private` 才包含） |
+| L4 领域打法 | `~/.dsh/skills/selfdistill-<领域>/SKILL.md` | 按需加载 |
 
-### 安装 selfstill 插件（可选）
+### 安装 selfdistill 插件（可选）
 
-让 DSH 的 agent 直接掌握 selfstill 蒸馏工作流（整理 → 提炼 → 逐条确认 → 构建 → 写回）：
+让 DSH 的 agent 直接掌握 selfdistill 蒸馏工作流（整理 → 提炼 → 逐条确认 → 构建 → 写回）：
 
 ```bash
 dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"

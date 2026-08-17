@@ -1,12 +1,12 @@
 ---
-name: selfstill
-description: 把用户与 AI 的聊天记录蒸馏成 L1–L4 个人档案（selfstill 工作流）：整理导出、提炼候选、逐条确认、构建 HTML、写回 DSH 或 Codex/Hermes。用户提到 selfstill、蒸馏、个人档案、写回 DSH 时使用。
-whenToUse: 用户要建立或更新 L1–L4 个人档案、蒸馏与 AI 的聊天记录、把档案写回 DSH/Codex/Hermes，或要求你接手 selfstill 项目时。
+name: selfdistill
+description: 把用户与 AI 的聊天记录蒸馏成 L1–L4 个人档案（selfdistill 工作流）：整理导出、提炼候选、逐条确认、构建 HTML、写回 DSH 或 Codex/Hermes。用户提到 selfdistill、蒸馏、个人档案、写回 DSH 时使用。
+whenToUse: 用户要建立或更新 L1–L4 个人档案、蒸馏与 AI 的聊天记录、把档案写回 DSH/Codex/Hermes，或要求你接手 selfdistill 项目时。
 ---
 
-# selfstill · 蒸馏工作流（DeepSeek Harness 版）
+# selfdistill · 蒸馏工作流（DeepSeek Harness 版）
 
-selfstill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天记录，在 **AI 辅助 + 人工确认** 下蒸馏成看得见、带来源、AI 也用得上的 L1–L4 个人档案，并写回 AI 工具（DSH / Codex / Hermes）。
+selfdistill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天记录，在 **AI 辅助 + 人工确认** 下蒸馏成看得见、带来源、AI 也用得上的 L1–L4 个人档案，并写回 AI 工具（DSH / Codex / Hermes）。
 
 | 层级 | 内容 | 通俗解释 |
 |------|------|----------|
@@ -17,7 +17,7 @@ selfstill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天记
 
 ## 工作前提
 
-- 有 selfstill 仓库 checkout：无则先 `git clone https://github.com/ryunana/selfstill`；
+- 有 selfdistill 仓库 checkout：无则先 `git clone https://github.com/ryunana/selfdistill`；
 - 需要 Python 3.9+（纯标准库，无第三方依赖）；
 - **用户负责导出聊天记录**（各 AI 工具的导出入口见仓库 `docs/intake.md`）。
 
@@ -42,7 +42,7 @@ selfstill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天记
 ### 3. 逐条人工确认（关键步骤）
 
 - 用 DSH 的提问能力（ask_user_question）把候选**逐条**交给用户确认：接受 / 修改 / 拒绝。
-- **未经确认，不得写入 `canonical/`。** 这是 selfstill 的硬规则。
+- **未经确认，不得写入 `canonical/`。** 这是 selfdistill 的硬规则。
 
 ### 4. 写入 canonical/
 
@@ -54,7 +54,7 @@ selfstill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天记
 ### 5. 构建（build.py）
 
 ```bash
-cd <selfstill 仓库>
+cd <selfdistill 仓库>
 python3 build.py                # 生成 dist/（HTML 可视化 + codex/ + hermes/ + dsh/）
 python3 build.py --include-private   # 额外包含私密 L3（默认排除）
 ```
@@ -71,7 +71,7 @@ python3 install.py --target dsh
   - **persona 只放 L1**（协作契约，常驻但非敏感）；
   - **L2/L3/L4 写成 `~/.dsh/skills/` 下的 skill**（按需加载，敏感内容不默认进入每个对话）。
 - 先展示 diff，**用户确认后才写入**；`--yes` 可跳过确认（慎用）。
-- 重复安装增量合并；目标文件已存在但无 selfstill 标记时拒绝覆盖。
+- 重复安装增量合并；目标文件已存在但无 selfdistill 标记时拒绝覆盖。
 - 写回 Codex/Hermes：`python3 install.py --target codex` / `--target hermes`（同样先展示 diff）。
 
 ### 7. 持续更新（有新对话后）
