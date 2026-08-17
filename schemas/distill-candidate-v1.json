@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.selfdistill/schemas/distill-candidate-v1.json",
+  "title": "selfdistill Initial Distillation Candidate v1",
+  "description": "A human-reviewable write candidate. Inferred observations and evidence gaps are intentionally excluded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "target", "statement", "assessment", "sources", "conflicts", "supersedes", "proposed_action", "review", "status"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "created_at": {"type": "string", "minLength": 10},
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer", "section"],
+      "properties": {
+        "layer": {"enum": ["L1", "L2", "L3", "L4"]},
+        "section": {"type": "string", "minLength": 1},
+        "domain_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "statement": {"type": "string", "minLength": 1},
+    "assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "scope", "nature", "sensitivity", "confidence", "risk", "controversy"],
+      "properties": {
+        "basis": {"enum": ["explicit", "observed", "conflict"]},
+        "scope": {"enum": ["universal", "contextual", "temporary", "one_off"]},
+        "nature": {"enum": ["personal", "general_rule"]},
+        "sensitivity": {"enum": ["normal", "sensitive"]},
+        "confidence": {"enum": ["low", "medium", "high"]},
+        "risk": {"enum": ["low", "high"]},
+        "controversy": {"enum": ["none", "present"]}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "reference", "quote", "role", "occurred_at"],
+        "properties": {
+          "type": {"enum": ["user_message", "authorized_first_party_material"]},
+          "reference": {"type": "string", "minLength": 1},
+          "quote": {"type": "string", "minLength": 1},
+          "role": {"enum": ["user", "first_party_owner"]},
+          "occurred_at": {"type": "string", "minLength": 1}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"type": {"const": "user_message"}}},
+            "then": {"properties": {"role": {"const": "user"}}}
+          },
+          {
+            "if": {"properties": {"type": {"const": "authorized_first_party_material"}}},
+            "then": {"properties": {"role": {"const": "first_party_owner"}}}
+          }
+        ]
+      }
+    },
+    "conflicts": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "supersedes": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "proposed_action": {"enum": ["add", "amend", "replace", "keep_separate"]},
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requirement", "reason"],
+      "properties": {
+        "requirement": {"enum": ["user_confirmation", "waived_general"]},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "status": {"enum": ["pending", "user_accepted", "user_modified", "user_rejected", "deferred", "policy_accepted_general", "unknown"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"target": {"properties": {"layer": {"const": "L3"}}}}},
+      "then": {"properties": {"assessment": {"properties": {"nature": {"const": "personal"}}}, "review": {"properties": {"requirement": {"const": "user_confirmation"}}}, "status": {"not": {"const": "policy_accepted_general"}}}}
+    },
+    {
+      "if": {"properties": {"review": {"properties": {"requirement": {"const": "waived_general"}}}}},
+      "then": {
+        "properties": {
+          "target": {"properties": {"layer": {"enum": ["L1", "L2", "L4"]}}},
+          "assessment": {"properties": {"basis": {"enum": ["explicit", "observed"]}, "nature": {"const": "general_rule"}, "sensitivity": {"const": "normal"}, "risk": {"const": "low"}, "controversy": {"const": "none"}}},
+          "conflicts": {"maxItems": 0},
+          "status": {"const": "policy_accepted_general"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "policy_accepted_general"}}},
+      "then": {"properties": {"review": {"properties": {"requirement": {"const": "waived_general"}}}}}
+    },
+    {
+      "if": {"properties": {"assessment": {"properties": {"nature": {"const": "personal"}}}}},
+      "then": {"properties": {"review": {"properties": {"requirement": {"const": "user_confirmation"}}}, "status": {"not": {"const": "policy_accepted_general"}}}}
+    },
+    {
+      "if": {"properties": {"assessment": {"properties": {"sensitivity": {"const": "sensitive"}}}}},
+      "then": {"properties": {"review": {"properties": {"requirement": {"const": "user_confirmation"}}}, "status": {"not": {"const": "policy_accepted_general"}}}}
+    },
+    {
+      "if": {"properties": {"assessment": {"properties": {"risk": {"const": "high"}}}}},
+      "then": {"properties": {"review": {"properties": {"requirement": {"const": "user_confirmation"}}}, "status": {"not": {"const": "policy_accepted_general"}}}}
+    },
+    {
+      "if": {"properties": {"assessment": {"properties": {"controversy": {"const": "present"}}}}},
+      "then": {"properties": {"review": {"properties": {"requirement": {"const": "user_confirmation"}}}, "status": {"not": {"const": "policy_accepted_general"}}}}
+    },
+    {
+      "if": {"properties": {"assessment": {"properties": {"basis": {"const": "conflict"}}}}},
+      "then": {"properties": {"review": {"properties": {"requirement": {"const": "user_confirmation"}}}, "proposed_action": {"const": "keep_separate"}, "status": {"const": "pending"}}}
+    },
+    {
+      "if": {"not": {"properties": {"conflicts": {"maxItems": 0}}}},
+      "then": {"properties": {"review": {"properties": {"requirement": {"const": "user_confirmation"}}}, "proposed_action": {"const": "keep_separate"}, "status": {"const": "pending"}}}
+    }
+  ]
+}

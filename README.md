@@ -13,7 +13,7 @@ selfdistill 是一个「AI 自我蒸馏」工具包，把你在 ChatGPT / Claude
 | L3 个人事实 | 身份、经历、偏好 | 「我是谁」 |
 | L4 领域打法 | 可复用的工作方法 | 「我擅长什么、怎么做」 |
 
-两个出口：① 本地多页 HTML 可视化；② 确认后增量写回你的 AI 工具（让 AI 持续认识你）。工作证据等具体领域内容由使用者自行放入 L4，不属于本工具的独立产物。
+两个出口：① 本地多页 HTML 可视化；② 确认后增量写回你的 AI 工具（让 AI 持续认识你）。此外，仓库提供独立的工作证据整理入口：它帮助核验项目贡献，但不会自动进入 L4、简历或正式档案。
 
 > 数据默认留在本机；「蒸馏」这一步要调云端 AI，提交给模型的内容受该供应商数据政策约束。
 
@@ -30,7 +30,7 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
 
 ## 快速开始
 
-你不需要先学会 Python。整个流程可以理解成：**你负责导出和确认，AI 负责整理、蒸馏、生成和写回。**
+你不需要先学会 Python。整个流程可以理解成：**你负责导出和确认，AI 负责整理、提出候选和生成建议；所有正式写入仍由你确认。**
 
 ### 使用者要做的
 
@@ -40,10 +40,10 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
    ```text
    请接手这个 selfdistill 项目：
    1. 按 docs/intake.md 整理我提供的聊天记录，原始记录只放在 input/，不要提交到 Git；
-   2. 按 prompts/distill.md 提炼 L1–L4 候选，逐条给我确认；
-   3. 未经我确认，不要写入 canonical/；
-   4. 我确认后再更新 canonical/ 并运行 python3 build.py；
-   5. 如果要写回 Codex 或 Hermes，先展示 diff，得到我明确确认后再执行 install.py。
+   2. 按 prompts/distill.md 从头读完材料，先报告阅读边界，再提出 L1–L4 候选；
+   3. L3 和个人/敏感/高风险/冲突内容逐条给我确认；只有可见、可撤回的低风险通用规则可免逐条确认；
+   4. 不要直接写 canonical/、L4 或简历。等我处理候选后，先展示完整 aggregate diff，再等我明确确认才写入；
+   5. 写入后再运行 python3 build.py；如果要写回 Codex 或 Hermes，先展示 diff，得到我明确确认后再执行 install.py。
    ```
 
 3. 查看 AI 给出的候选，逐条确认、修改或拒绝。需要写回 AI 工具时，再确认一次 diff。
@@ -52,9 +52,17 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
 
 1. 阅读 `docs/intake.md`，把使用者导出的记录整理成统一 Markdown，放进已被 Git 忽略的 `input/`。
 2. 按 `prompts/distill.md` 提炼 L1–L4 候选；先展示来源和候选，不直接改正式档案。
-3. 只把使用者确认过的内容写进 `canonical/`（结构参考 `templates/`，仓库里的「张三」是虚构样例）。
+3. 只在用户已处理候选、并明确确认了最终 aggregate diff 后，才增量写入 `canonical/`（结构参考 `templates/`，仓库里的「张三」是虚构样例）。
 4. 运行 `python3 build.py`，生成 `dist/index.html`、L1–L4 报告以及 `dist/codex/`、`dist/hermes/`。
 5. 如使用者要写回，运行 `python3 install.py --target codex`（或 `hermes`）：先展示 diff，等使用者明确确认后再增量写入，不覆盖无关内容。
+
+## 首次蒸馏：从完整历史建立 L1–L4
+
+先按 [`docs/intake.md`](docs/intake.md) 把获授权的聊天整理为统一 Markdown，再使用 [`prompts/distill.md`](prompts/distill.md)。AI 必须完整阅读并报告范围、证据、冲突、时效和未读内容，只提出候选而不直接改正式档案。
+
+L3 始终逐条确认；L1/L2/L4 中描述个人的内容，以及敏感、高风险、有争议或有冲突的内容，也都逐条确认。只有与个人无关、低风险、非敏感、无争议、无冲突的通用规则可以免逐条确认；它们仍必须单独可见、可撤回，并记录为 `policy_accepted_general`，绝不是用户逐条接受。无论候选如何通过，真正写文件前始终需要一次明确的 aggregate diff 确认。
+
+[`templates/distill-candidates.md`](templates/distill-candidates.md) 是人看的审阅单；[`schemas/distill-candidate-v1.json`](schemas/distill-candidate-v1.json) 是给未来自动化准备的同一份字段契约。普通使用者不需要手写 JSON。
 
 ## 支持矩阵
 
@@ -65,21 +73,28 @@ open dist/index.html  # 可视化展示页：L1–L4 分层架构、内容分布
 | Gemini 网页导出（Takeout · 我的活动 · Gemini Apps） | 📄 有导入说明 |
 | DeepSeek 网页导出 | 📄 有导入说明 |
 
-## 手动更新（有新对话后）
+## 重新导入一批新对话
 
-追加到 `input/` → 重跑同一蒸馏 prompt → 人工确认 diff → `python3 build.py`（+ `install.py` 如需要）。无需任何调度器。
+如果新增的是一批完整聊天记录，继续把整理后的内容追加到 `input/`，重跑 `prompts/distill.md`，人工确认候选后再运行 `python3 build.py`（确实需要写回时再确认 `install.py`）。这个流程适合批量导入新的聊天记录，不需要任何调度器。
 
 ## 持续更新自己的档案
 
-第一次蒸馏完成后，可以用本地 inbox 保留后续对话中的明确修正、表达偏差和边界补充：
+第一次蒸馏完成后，如果新增的是日常对话中的明确修正、表达偏差或边界补充，可以走更轻量的 inbox 流程，不必重新导入整批聊天记录：
 
 1. 按 [`schemas/inbox-v2.json`](schemas/inbox-v2.json) 在 `inbox/` 新建一个候选 JSON。直接来自对话的候选可以先把 `evidence_ids` 留空，状态使用 `pending`。
 2. 运行 `python3 distill_audit.py audit`。它会递归读取 `canonical/**/*.md` 和 `inbox/*.json`，生成完整的 `reports/latest/` 证据包与六维覆盖报告；`inbox/README.md` 只作为说明登记。
-3. 把 [`prompts/rediscovery.md`](prompts/rediscovery.md) 交给你当前选择的 AI，并要求它从头到尾阅读 `reports/latest/evidence.md`。它只能把发现和待确认候选写回 `reports/`，不会自动修改 `canonical/`。
-4. 运行 `python3 distill_audit.py verify reports/latest`，确认来源没有漂移、候选格式正确、所有 evidence 引用真实存在，再逐条接受、拒绝或标记为未知。
+   > 每次运行 `audit` 都会重建并替换整个 `reports/latest/`。如果里面已有尚未处理的 `discoveries.md` 或 `candidates/`，请先完成审阅，或把需要保留的文件另存到 `reports/latest/` 之外。
+3. 把 [`prompts/rediscovery.md`](prompts/rediscovery.md) 交给你当前选择的 AI，并要求它从头到尾阅读 `reports/latest/evidence.md`。要求它只把发现和待确认候选写回 `reports/`，不要修改 `canonical/`。
+4. 运行 `python3 distill_audit.py verify reports/latest`，确认来源没有漂移、候选格式正确、所有 evidence 引用真实存在，再逐条接受、拒绝或标记为未知。`verify` 不判断候选结论是否正确，也不能证明 AI 已完整阅读全部证据，最终仍需人工审阅；`accepted` 只表示你接受了候选，不表示它已经写入 `canonical/`。
 5. 由你人工把确认后的内容更新到 `canonical/`，然后继续使用原有 `python3 build.py`；确实需要写回 Codex 或 Hermes 时，再展示 diff 并明确确认 `install.py --target ...`。
 
 `inbox/*.json`、`reports/`、`input/` 和 `dist/` 都是本机数据或生成物，默认被 Git 忽略；仓库只保留 inbox 说明和 `input/.gitkeep`。数据默认留在本机，但如果你把 `evidence.md` 交给云端 AI，仍须遵守该模型供应商的数据政策。不要把真实聊天、候选或报告提交到公开仓库。
+
+## 工作证据：整理项目事实，不自动包装成果
+
+把用户授权的项目材料交给 [`prompts/work-evidence.md`](prompts/work-evidence.md)。它会将项目背景、目标、职责、行动、交付物、结果、指标、来源和待补证分开，并严格区分参与、负责、主导与决策所有权。指标必须保留统计口径、时间窗口、基线和来源；缺失就留空，不补造数字、因果关系、职责或项目状态。
+
+工作证据是独立、可选的审阅材料：所有个人贡献均需逐条确认，不存在通用规则免审，也不会自动写入简历、L4 或 `canonical/`。[`templates/work-evidence.md`](templates/work-evidence.md) 供人工审阅；[`schemas/work-evidence-v1.json`](schemas/work-evidence-v1.json) 供将来自动化读取，普通使用者无需手写 JSON。若日后确实要写文件，仍先展示并明确确认 aggregate diff。
 
 ## 依赖
 

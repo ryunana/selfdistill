@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.selfdistill/schemas/work-evidence-v1.json",
+  "title": "selfdistill Work Evidence v1",
+  "description": "A separately reviewed project evidence record. Item review records user decisions; top-level status is aggregate review progress only, never content acceptance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "project", "claims", "deliverables", "metrics", "resume_suggestions", "l4_suggestions", "sensitivity", "gaps", "status"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "created_at": {"type": "string", "minLength": 10},
+    "project": {
+      "description": "Display identity only. Factual background, goal, and status must be represented as sourced claims.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {"name": {"type": "string", "minLength": 1}}
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "statement", "ownership", "verification", "sources", "review"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "type": {"enum": ["background", "goal", "responsibility", "action", "result", "status"]},
+          "statement": {"type": "string", "minLength": 1},
+          "ownership": {"enum": ["participated", "responsible", "led", "decision_owner", "not_applicable", "unknown"]},
+          "verification": {"enum": ["verified", "user_stated", "third_party_stated", "unknown"]},
+          "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
+          "review": {"$ref": "#/$defs/item_review"}
+        },
+        "allOf": [
+          {"if": {"properties": {"verification": {"const": "verified"}}}, "then": {"properties": {"sources": {"contains": {"properties": {"type": {"const": "first_party_artifact"}}, "required": ["type"]}}}}},
+          {"if": {"properties": {"verification": {"const": "user_stated"}}}, "then": {"properties": {"sources": {"contains": {"properties": {"type": {"const": "user_statement"}}, "required": ["type"]}}}}},
+          {"if": {"properties": {"verification": {"const": "third_party_stated"}}}, "then": {"properties": {"sources": {"contains": {"properties": {"type": {"const": "third_party_evaluation"}}, "required": ["type"]}}}}}
+        ]
+      }
+    },
+    "deliverables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description", "claim_ids", "sources", "review"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": "string"},
+          "claim_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
+          "review": {"$ref": "#/$defs/item_review"}
+        }
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "value", "unit", "definition", "time_window", "baseline", "verification", "sources", "review"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "value": {"type": ["number", "string", "null"]},
+          "unit": {"type": ["string", "null"]},
+          "definition": {"type": ["string", "null"]},
+          "time_window": {"type": ["string", "null"]},
+          "baseline": {"type": ["string", "number", "null"]},
+          "verification": {"enum": ["verified", "user_stated", "third_party_stated", "unknown"]},
+          "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
+          "review": {"$ref": "#/$defs/item_review"}
+        },
+        "allOf": [
+          {"if": {"properties": {"verification": {"const": "verified"}}}, "then": {"properties": {"sources": {"contains": {"properties": {"type": {"const": "first_party_artifact"}}, "required": ["type"]}}}}},
+          {"if": {"properties": {"verification": {"const": "user_stated"}}}, "then": {"properties": {"sources": {"contains": {"properties": {"type": {"const": "user_statement"}}, "required": ["type"]}}}}},
+          {"if": {"properties": {"verification": {"const": "third_party_stated"}}}, "then": {"properties": {"sources": {"contains": {"properties": {"type": {"const": "third_party_evaluation"}}, "required": ["type"]}}}}}
+        ]
+      }
+    },
+    "resume_suggestions": {"type": "array", "items": {"$ref": "#/$defs/suggestion"}},
+    "l4_suggestions": {"type": "array", "items": {"$ref": "#/$defs/suggestion"}},
+    "sensitivity": {"enum": ["normal", "sensitive"]},
+    "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "status": {"description": "Aggregate review progress only; does not accept or reject any item.", "enum": ["pending", "in_review", "reviewed", "unknown"]}
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "reference", "quote", "occurred_at"],
+      "properties": {
+        "type": {"enum": ["user_statement", "first_party_artifact", "third_party_evaluation", "unknown"]},
+        "reference": {"type": "string", "minLength": 1},
+        "quote": {"type": "string"},
+        "occurred_at": {"type": "string", "minLength": 1}
+      }
+    },
+    "item_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"enum": ["pending", "user_accepted", "user_modified", "user_rejected", "deferred", "unknown"]},
+        "note": {"type": "string", "minLength": 1}
+      }
+    },
+    "suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement", "claim_ids", "review"],
+      "properties": {
+        "statement": {"type": "string", "minLength": 1},
+        "claim_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "review": {"$ref": "#/$defs/item_review"}
+      }
+    }
+  }
+}
