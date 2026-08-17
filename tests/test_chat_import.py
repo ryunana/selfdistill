@@ -142,6 +142,15 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(len(convs), 1)
             self.assertIn("工具片段 2 条", skipped[0][1])
 
+    def test_deepseek_nested_file_metadata_is_not_stringified(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations.json"
+            p.write_text(json.dumps([{"id": "x", "mapping": {"n": {"parent": None, "children": [], "message": {
+                "fragments": [{"type": "REQUEST", "content": "q"}, {"type": "FILE", "files": [{"file_name": {"secret": 1}}]}]}}}}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_deepseek(p)
+            self.assertNotIn("secret", "\n".join(m[3] for m in convs[0][4]))
+            self.assertTrue(any("附件元数据结构损坏" in reason for _ref, reason in skipped))
+
     def test_deepseek_branches_are_separate_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "conversations.json"
@@ -247,6 +256,8 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(any("残留未闭合" in event for event in events))
         self.assertEqual(ic._clean_codex_user("<name>Ada</name><path>/safe</path>"),
                          "<name>Ada</name><path>/safe</path>")
+        self.assertEqual(ic._clean_codex_user("<imagery>keep</imagery><image-processing>x</image-processing>"),
+                         "<imagery>keep</imagery><image-processing>x</image-processing>")
 
     def test_malformed_json_boundaries_are_reported_without_attribute_errors(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -276,6 +287,16 @@ class ParserTests(unittest.TestCase):
             self.assertTrue(any("结构损坏" in event for event in events))
             with self.assertRaises(ic.ImportError_):
                 ic._classify_local_file(codex, "auto")
+
+    def test_claude_non_string_type_is_structured_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "c.jsonl"
+            p.write_text(json.dumps({"type": [], "message": {}}), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_claude(p, events))
+            self.assertTrue(any("type 不是字符串" in event for event in events))
+            with self.assertRaises(ic.ImportError_):
+                ic._classify_local_file(p, "auto")
 
     def test_peek_ignores_non_object_codex_payload_and_claude_message(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -511,6 +532,14 @@ class ParserTests(unittest.TestCase):
             with self.assertRaisesRegex(ic.ImportError_, "多个结构化活动时间"):
                 ic.parse_gemini(p)
 
+    def test_gemini_legacy_answer_keeps_date_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:00</div><div>Prompted：问题</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:01</div><div>Gemini：回答提到 2026年8月5日 上午9:00</div></div>""", encoding="utf-8")
+            convs, _skipped, _total = ic.parse_gemini(p)
+            self.assertIn("2026年8月5日 上午9:00", convs[0][4][1][3])
+
     def test_gemini_splits_prompted_activities_with_stable_ids(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "我的活动记录.html"
@@ -694,6 +723,44 @@ class CliTests(unittest.TestCase):
                 ic.load_imported(out)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "state")
             self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+
+    def test_output_ancestor_symlink_is_rejected_without_touching_external_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            external = base / "external"
+            external.mkdir()
+            os.chmod(external, 0o755)
+            parent = base / "linked-parent"
+            parent.symlink_to(external, target_is_directory=True)
+            nested = parent / "nested"
+            with self.assertRaisesRegex(ic.ImportError_, "祖先是符号链接"):
+                ic.load_imported(nested)
+            self.assertFalse((external / "nested").exists())
+            self.assertEqual(os.stat(external).st_mode & 0o777, 0o755)
+
+    def test_zip_read_runtime_error_becomes_import_error(self) -> None:
+        fake = unittest.mock.MagicMock()
+        fake.__enter__.return_value = fake
+        fake.namelist.return_value = ["conversations.json"]
+        fake.read.side_effect = RuntimeError("encrypted")
+        with unittest.mock.patch("zipfile.ZipFile", return_value=fake):
+            with self.assertRaises(ic.ImportError_):
+                ic.parse_deepseek(Path("fake.zip"))
+
+    def test_local_cancellation_exits_without_report_or_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session = root / "rollout-c.jsonl"
+            session.write_text(json.dumps({"type": "session_meta", "payload": {"id": "c"}}), encoding="utf-8")
+            out = root / "out"
+            r = subprocess.run([sys.executable, "import_chats.py", "--source", "local", "--path", str(session),
+                                "--local-format", "codex", "--root", str(out)], input="n\n", text=True,
+                               capture_output=True, cwd=str(PROJECT_ROOT))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("已取消。", r.stdout)
+            self.assertNotIn("完成。", r.stdout)
+            self.assertNotIn("写入目录", r.stdout)
+            self.assertFalse(out.exists())
 
     def test_collision_cli_reports_only_successful_outputs_and_partial_exit(self) -> None:
         def conversation(cid: str, mid: str) -> dict:

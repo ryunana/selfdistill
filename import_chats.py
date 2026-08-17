@@ -44,6 +44,7 @@ SKIP_BAD = "损坏/无法解析"
 SKIP_UNKNOWN = "结构未能识别"
 SKIP_DUP = "已导入过（无新消息）"
 SKIP_EXCLUDED = "被排除"
+SKIP_CANCELLED = "__cancelled__"
 
 
 class ImportError_(Exception):
@@ -407,11 +408,12 @@ def _gemini_time(lines: list[str]) -> Optional[str]:
     return None
 
 
-def _gemini_visible_text(lines: list[str], marker: str) -> str:
+def _gemini_visible_text(lines: list[str], marker: str, metadata_indexes: Optional[set[int]] = None) -> str:
     out = []
     marker_re = re.compile(rf"^{marker}\s*[:：]?\s*", re.I)
-    for line in lines:
-        if _TIME_LINE.search(line) or _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
+    metadata_indexes = metadata_indexes or set()
+    for index, line in enumerate(lines):
+        if index in metadata_indexes or _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
             continue
         line = marker_re.sub("", line).strip()
         if line and line.lower() not in ("gemini", "prompted"):
@@ -497,7 +499,7 @@ def parse_gemini(path: Path) -> tuple:
         elif is_legacy_answer:
             if pending is None:
                 raise ImportError_(f"{target} 存在未绑定 Prompted 的 Gemini 回答（请改用手工整理）")
-            answer = _gemini_visible_text(lines, "Gemini")
+            answer = _gemini_visible_text(lines, "Gemini", structural_time_indexes)
             if answer:
                 pending["answer"] = answer
                 activities.append(pending)
@@ -542,7 +544,7 @@ def parse_deepseek(path: Path) -> tuple:
                 if name is None:
                     raise ImportError_(f"压缩包中未找到 conversations.json：{path}")
                 data = json.loads(z.read(name).decode("utf-8"))
-        except (OSError, zipfile.BadZipFile, UnicodeDecodeError, json.JSONDecodeError) as e:
+        except (OSError, RuntimeError, zipfile.BadZipFile, UnicodeDecodeError, json.JSONDecodeError) as e:
             raise ImportError_(f"无法解压/读取 {path}：{e}")
     else:
         try:
@@ -628,8 +630,11 @@ def parse_deepseek(path: Path) -> tuple:
                             counted_fragments.add((nid, fragment_index))
                     elif ftype == "FILE":
                         for fi in fr.get("files") or []:
-                            if isinstance(fi, dict):
-                                text_parts.append(f"[附件: {fi.get('file_name') or fi.get('file_id')}]")
+                            value = fi.get("file_name") or fi.get("file_id")
+                            if isinstance(value, (str, int, float)):
+                                text_parts.append(f"[附件: {value}]")
+                            else:
+                                skipped.append((str(conv.get("id") or nid), "内部内容已排除：附件元数据结构损坏"))
                     elif ftype in ("SEARCH", "TOOL_SEARCH", "TOOL_OPEN"):
                         if (nid, fragment_index) not in counted_fragments:
                             tool_count += 1
@@ -671,7 +676,7 @@ _CODEX_ENVELOPE_TAGS = (
 )
 _CODEX_ENVELOPE_RE = [re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", re.I | re.S)
                       for tag in _CODEX_ENVELOPE_TAGS]
-_IMAGE_TAG_RE = re.compile(r"<image[^>]*>.*?</image>|<image[^>]*>", re.S)
+_IMAGE_TAG_RE = re.compile(r"<image(?=[\s/>])[^>]*>.*?</image\s*>|<image(?=[\s/>])[^>]*>", re.S)
 _CODEX_AGENTS_RE = re.compile(
     r"^\s*#\s*AGENTS\.md instructions[^\n]*\n\s*<INSTRUCTIONS\b[^>]*>.*?</INSTRUCTIONS>\s*",
     re.I | re.S)
@@ -905,9 +910,14 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                 if events is not None:
                     events.append("内部内容已排除：Claude isSidechain")
                 continue
-            if d.get("type") not in ("user", "assistant"):
+            dtype = d.get("type")
+            if not isinstance(dtype, str):
                 if events is not None:
-                    if d.get("type") in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
+                    events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 type 不是字符串")
+                continue
+            if dtype not in ("user", "assistant"):
+                if events is not None:
+                    if dtype in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
                         events.append("内部内容已排除：Claude 已知非消息记录")
                     else:
                         events.append(f"未知内部记录告警：Claude type={d.get('type') or '?'}")
@@ -993,6 +1003,22 @@ def imported_path(out_dir: Path) -> Path:
 def _assert_safe_output_root(out_dir: Path) -> None:
     if out_dir.is_symlink():
         raise ImportError_(f"输出根目录是符号链接，拒绝访问：{out_dir}")
+    absolute = out_dir.absolute()
+    trusted = [ROOT.absolute(), Path.cwd().absolute(), Path.home().absolute(),
+               Path(tempfile.gettempdir()).absolute()]
+    bases = []
+    for base in trusted:
+        try:
+            absolute.relative_to(base)
+            bases.append(base)
+        except ValueError:
+            continue
+    base = max(bases, key=lambda candidate: len(candidate.parts)) if bases else Path(absolute.anchor)
+    current = base
+    for part in absolute.relative_to(base).parts:
+        current /= part
+        if current.is_symlink():
+            raise ImportError_(f"输出根目录祖先是符号链接，拒绝访问：{current}")
     if imported_path(out_dir).is_symlink():
         raise ImportError_(f"状态文件是符号链接，拒绝访问：{imported_path(out_dir)}")
 
@@ -1312,7 +1338,7 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
             ans = "n"
         if ans not in ("y", "yes"):
             print("已取消。")
-            return (len(found), 0, 0, 0, 0, discovery_failures)
+            return (len(found), 0, 0, 0, 0, [("—", SKIP_CANCELLED)])
     new = updated = dup = 0
     bad = list(discovery_failures)
     seen_keys: set[str] = set()
@@ -1400,11 +1426,14 @@ def _classify_local_file(path: Path, forced: str) -> str:
                 record = json.loads(line)
                 if not isinstance(record, dict):
                     raise ImportError_("无法识别本地 JSONL：记录不是对象")
-                if record.get("type") in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
+                dtype = record.get("type")
+                if dtype is not None and not isinstance(dtype, str):
+                    raise ImportError_("无法识别本地 JSONL：type 不是字符串")
+                if dtype in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
                     continue
-                if record.get("type") == "session_meta" or "payload" in record:
+                if dtype == "session_meta" or "payload" in record:
                     return "codex"
-                if record.get("type") in ("user", "assistant", "mode") or "message" in record:
+                if dtype in ("user", "assistant", "mode") or "message" in record:
                     return "claude"
     except (OSError, json.JSONDecodeError) as e:
         raise ImportError_(f"无法识别本地 JSONL：{e}")
@@ -1471,6 +1500,9 @@ def main() -> int:
     except (ImportError_, OSError) as e:
         print(f"错误：{e}", file=sys.stderr)
         return 1
+
+    if any(reason == SKIP_CANCELLED for _ref, reason in skipped):
+        return 0
 
     print_report(total, outputs, new, updated, dup, skipped, args.source, args.dry_run)
     failures = sum(1 for _ref, reason in skipped if not _is_expected_exclusion(reason))
