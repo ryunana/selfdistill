@@ -359,8 +359,8 @@ class _GeminiActivityExtractor(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.blocks: list[tuple[list[str], set[int]]] = []
-        self._parts: list[tuple[str, bool]] = []
+        self.blocks: list[tuple[list[str], set[int], set[int]]] = []
+        self._parts: list[tuple[str, bool, bool]] = []
         self._depth = 0
         self._tags: list[tuple[str, set[str]]] = []
 
@@ -385,9 +385,11 @@ class _GeminiActivityExtractor(HTMLParser):
             self._tags.pop()
         self._depth -= 1
         if self._depth == 0:
-            lines = [text for text, _is_time in self._parts]
+            lines = [text for text, _is_time, _is_field in self._parts]
             if lines:
-                self.blocks.append((lines, {i for i, (_text, is_time) in enumerate(self._parts) if is_time}))
+                self.blocks.append((lines,
+                    {i for i, (_text, is_time, _is_field) in enumerate(self._parts) if is_time},
+                    {i for i, (_text, _is_time, is_field) in enumerate(self._parts) if is_field}))
 
     def handle_data(self, data):
         if self._depth and data.strip():
@@ -397,7 +399,8 @@ class _GeminiActivityExtractor(HTMLParser):
             is_time_field = (tag == "div" and (("content-cell" in classes
                               and "mdl-typography--body-1" in classes)
                              or "header-cell" in classes))
-            self._parts.append((data.strip(), is_time_field))
+            is_provider_field = tag == "div" and "content-cell" in classes and "mdl-typography--body-1" in classes
+            self._parts.append((data.strip(), is_time_field, is_provider_field))
 
 
 def _gemini_time(lines: list[str]) -> Optional[str]:
@@ -408,14 +411,18 @@ def _gemini_time(lines: list[str]) -> Optional[str]:
     return None
 
 
-def _gemini_visible_text(lines: list[str], marker: str, metadata_indexes: Optional[set[int]] = None) -> str:
+def _gemini_visible_text(lines: list[str], marker: str, metadata_indexes: Optional[set[int]] = None,
+                         provider_indexes: Optional[set[int]] = None) -> str:
     out = []
-    marker_re = re.compile(rf"^{marker}\s*[:：]?\s*", re.I)
+    marker_re = re.compile(rf"^{re.escape(marker)}(?:\s*[:：]\s*|\s*$)", re.I)
     metadata_indexes = metadata_indexes or set()
+    provider_indexes = provider_indexes or set()
     for index, line in enumerate(lines):
         if index in metadata_indexes or _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
             continue
         line = marker_re.sub("", line).strip()
+        if index in provider_indexes and re.match(rf"^{re.escape(marker)}\s+", line, re.I):
+            line = re.sub(rf"^{re.escape(marker)}\s+", "", line, flags=re.I)
         if line and line.lower() not in ("gemini", "prompted"):
             out.append(line)
     return "\n".join(out).strip()
@@ -426,22 +433,25 @@ def _gemini_answer_text(lines: list[str]) -> str:
     for line in lines:
         if _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
             break
-        line = re.sub(r"^Gemini\s*[:：]?\s*", "", line, flags=re.I).strip()
+        line = re.sub(r"^Gemini(?:\s*[:：]\s*|\s*$)", "", line, flags=re.I).strip()
         if line and line != "Gemini Apps":
             out.append(line)
     return "\n".join(out).strip()
 
 
-def _gemini_user_text(lines: list[str]) -> str:
+def _gemini_user_text(lines: list[str], provider_indexes: Optional[set[int]] = None) -> str:
     out = []
     attachments = False
-    for line in lines:
+    provider_indexes = provider_indexes or set()
+    for index, line in enumerate(lines):
         # The caller has already sliced away the one selected activity timestamp.
         # Date-like text inside a prompt is legitimate user content.
         if _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
             continue
-        if re.match(r"^Prompted\s*[:：]?", line, re.I):
-            line = re.sub(r"^Prompted\s*[:：]?\s*", "", line, flags=re.I)
+        if re.match(r"^Prompted(?:\s*[:：]\s*|\s*$)", line, re.I):
+            line = re.sub(r"^Prompted(?:\s*[:：]\s*|\s*$)", "", line, flags=re.I)
+        elif index in provider_indexes and re.match(r"^Prompted\s+", line, re.I):
+            line = re.sub(r"^Prompted\s+", "", line, flags=re.I)
         if re.match(r"^Attached\s+\d+\s+files?\.?", line, re.I):
             attachments = True
             continue
@@ -464,15 +474,17 @@ def parse_gemini(path: Path) -> tuple:
         raise ImportError_(f"{target} 未找到可靠的 Gemini 活动容器（请改用手工整理）")
     activities = []
     pending = None
-    for lines, structural_time_indexes in parser.blocks:
-        joined = "\n".join(lines)
-        is_prompt = bool(re.search(r"(?:^|\n)Prompted\s*[:：]?", joined, re.I))
-        is_legacy_answer = bool(re.search(r"(?:^|\n)Gemini\s*[:：]", joined, re.I))
+    for lines, structural_time_indexes, provider_indexes in parser.blocks:
+        is_prompt = any(re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
+                        or (i in provider_indexes and re.match(r"^Prompted\s+", line, re.I))
+                        for i, line in enumerate(lines))
+        is_legacy_answer = any(re.match(r"^Gemini(?:\s*[:：]|\s*$)", line, re.I) for line in lines)
         if is_prompt:
             if pending is not None:
                 activities.append(pending)
             prompt_index = next(i for i, line in enumerate(lines)
-                                if re.match(r"^Prompted\s*[:：]?", line, re.I))
+                                if re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
+                                or (i in provider_indexes and re.match(r"^Prompted\s+", line, re.I)))
             timestamp_indexes = [i for i in structural_time_indexes if i > prompt_index
                                  and _TIME_FIELD.fullmatch(lines[i])]
             # Bind only direct content-cell/body-1 timestamp fields. Dates in
@@ -485,7 +497,8 @@ def parse_gemini(path: Path) -> tuple:
             legacy_time = (_gemini_time([lines[legacy_timestamp_indexes[0]]])
                            if len(legacy_timestamp_indexes) == 1 else None)
             user_lines = lines[prompt_index:timestamp_index] if timestamp_index is not None else lines[prompt_index:]
-            text = _gemini_user_text(user_lines)
+            text = _gemini_user_text(user_lines, {i - prompt_index for i in provider_indexes
+                                                   if prompt_index <= i < (timestamp_index or len(lines))})
             timestamp = _gemini_time([lines[timestamp_index]]) if timestamp_index is not None else legacy_time
             if not timestamp or not text:
                 raise ImportError_(f"{target} 存在无法可靠绑定时间或正文的 Prompted 活动（请改用手工整理）")
@@ -499,7 +512,7 @@ def parse_gemini(path: Path) -> tuple:
         elif is_legacy_answer:
             if pending is None:
                 raise ImportError_(f"{target} 存在未绑定 Prompted 的 Gemini 回答（请改用手工整理）")
-            answer = _gemini_visible_text(lines, "Gemini", structural_time_indexes)
+            answer = _gemini_visible_text(lines, "Gemini", structural_time_indexes, provider_indexes)
             if answer:
                 pending["answer"] = answer
                 activities.append(pending)
@@ -674,7 +687,7 @@ _CODEX_ENVELOPE_TAGS = (
     "external_codex_apps_writing_block_edits_part_2_of_3",
     "external_codex_apps_writing_block_edits_part_3_of_3",
 )
-_CODEX_ENVELOPE_RE = [re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", re.I | re.S)
+_CODEX_ENVELOPE_RE = [re.compile(rf"^\s*<{tag}\b[^>]*>.*?</{tag}>\s*", re.I | re.S)
                       for tag in _CODEX_ENVELOPE_TAGS]
 _IMAGE_TAG_RE = re.compile(r"<image(?=[\s/>])[^>]*>.*?</image\s*>|<image(?=[\s/>])[^>]*>", re.S)
 _CODEX_AGENTS_RE = re.compile(
@@ -1063,7 +1076,7 @@ def save_imported(imported: dict, out_dir: Path) -> None:
 
 def _format_message(role: str, t: Optional[str], mid: str, text: str) -> str:
     tstr = t or "（未知）"
-    return f"**{role}**（{tstr}；message_id: {_escape_managed_markers(mid)}）：\n{_escape_managed_markers(text)}"
+    return f"**{role}**（{tstr}；message_id: {_markdown_metadata(mid)}）：\n{_escape_managed_markers(text)}"
 
 
 def _render_messages(msgs: list) -> str:
@@ -1075,6 +1088,13 @@ def _escape_managed_markers(text: str) -> str:
     text = _normalize_message_text(text)
     return (text.replace("<!-- distill-messages:begin -->", "&lt;!-- distill-messages:begin --&gt;")
                 .replace("<!-- distill-messages:end -->", "&lt;!-- distill-messages:end --&gt;"))
+
+
+def _markdown_metadata(value) -> str:
+    """Render IDs in one inert Markdown line while preserving safe normal IDs."""
+    text = str(value).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;"))
 
 
 def _managed_parts(content: str, path: Path) -> tuple[str, str, str]:
@@ -1114,7 +1134,7 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
     old_cids = re.findall(r"^<!-- conversation_id: (.*?) -->\s*$", content, re.MULTILINE)
     if len(old_sources) != 1 or len(old_cids) != 1:
         raise ImportError_(f"文件名冲突：{key} 的现有目标缺少或重复所有权元数据")
-    if (old_sources[0], old_cids[0]) != (_escape_managed_markers(source), _escape_managed_markers(cid)):
+    if (old_sources[0], old_cids[0]) != (_markdown_metadata(source), _markdown_metadata(cid)):
         raise ImportError_(f"文件名冲突：{key} 会覆盖现有会话 {old_sources[0]}:{old_cids[0]}")
 
 
@@ -1163,8 +1183,8 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
 
 def _build_content(source: str, cid: str, title: str, exported_at: str, msgs: list) -> str:
     lines = [f"# {_escape_managed_markers(source)} · {_escape_managed_markers(title)}", "",
-             f"<!-- source: {_escape_managed_markers(source)} -->",
-             f"<!-- conversation_id: {_escape_managed_markers(cid)} -->",
+             f"<!-- source: {_markdown_metadata(source)} -->",
+             f"<!-- conversation_id: {_markdown_metadata(cid)} -->",
              f"<!-- exported_at: {exported_at} -->",
              "", "<!-- distill-messages:begin -->"]
     if msgs:

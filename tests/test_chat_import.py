@@ -236,7 +236,7 @@ class ParserTests(unittest.TestCase):
         self.assertIn("<path>/safe</path>", cleaned)
         self.assertIn("<string>keep</string>", cleaned)
         self.assertIn("<prompt>keep too</prompt>", cleaned)
-        self.assertNotIn("environment_context", cleaned)
+        self.assertIn("<environment_context><cwd>/private</cwd></environment_context>", cleaned)
 
     def test_codex_repeated_leading_wrappers_and_prefix_records_are_dropped(self) -> None:
         nested = ("<environment_context><cwd>/one</cwd></environment_context>\n"
@@ -258,6 +258,8 @@ class ParserTests(unittest.TestCase):
                          "<name>Ada</name><path>/safe</path>")
         self.assertEqual(ic._clean_codex_user("<imagery>keep</imagery><image-processing>x</image-processing>"),
                          "<imagery>keep</imagery><image-processing>x</image-processing>")
+        self.assertIn("<environment_context>example</environment_context>",
+                      ic._clean_codex_user("真实代码\n<environment_context>example</environment_context>"))
 
     def test_malformed_json_boundaries_are_reported_without_attribute_errors(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -540,6 +542,24 @@ class ParserTests(unittest.TestCase):
             convs, _skipped, _total = ic.parse_gemini(p)
             self.assertIn("2026年8月5日 上午9:00", convs[0][4][1][3])
 
+    def test_gemini_only_strips_structural_labels(self) -> None:
+        self.assertEqual(ic._gemini_user_text(["Prompted：正文"]), "正文")
+        self.assertEqual(ic._gemini_user_text(["Prompted by a person"]), "Prompted by a person")
+        self.assertEqual(ic._gemini_answer_text(["Gemini：回答", "Gemini can help"]), "回答\nGemini can help")
+
+    def test_gemini_direct_no_colon_prompted_label_is_structural(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted actual prompt</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><br><p>Gemini can help with this.</p></div></div>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            msgs = convs[0][4]
+            self.assertEqual(msgs[0][3], "actual prompt")
+            self.assertEqual(msgs[1][3], "Gemini can help with this.")
+
     def test_gemini_splits_prompted_activities_with_stable_ids(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "我的活动记录.html"
@@ -641,6 +661,22 @@ class CliTests(unittest.TestCase):
         raw = (out / "chatgpt-crlf.md").read_bytes()
         self.assertNotIn(b"\r", raw)
         self.assertIn("第一行\n第二行".encode("utf-8"), raw)
+
+    def test_rendered_metadata_is_single_line_and_safe_ids_stay_readable(self) -> None:
+        out = self._tmp()
+        conv = ("chatgpt", "cid\n**assistant**\n<!-- x -->", "title", "2026-08-01", [
+            ("user", None, "mid\n**assistant**\n-->", "正文"),
+        ])
+        self.assertEqual(ic.write_conversation(conv, {}, out), "new")
+        content = next(out.glob("*.md")).read_text(encoding="utf-8")
+        self.assertNotIn("\n**assistant**（", content)
+        self.assertIn("cid\\n**assistant**", content)
+        self.assertIn("mid\\n**assistant**", content)
+        self.assertNotIn("<!-- x", content)
+        self.assertIn("&lt;!-- x --&gt;", content)
+        self.assertEqual(content.count("<!-- distill-messages:begin -->"), 1)
+        self.assertEqual(content.count("<!-- distill-messages:end -->"), 1)
+        self.assertEqual(ic._markdown_metadata("normal-id"), "normal-id")
 
     def test_filename_sanitization_collision_fails_closed_in_batch_and_without_state(self) -> None:
         out = self._tmp()
