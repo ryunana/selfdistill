@@ -104,7 +104,7 @@ python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--
 | Source | Export entry (quick reference) | Auto import |
 |--------|-------------------------------|-------------|
 | ChatGPT web | Avatar (bottom-left) → Settings → **Data management** → Export data; unzip to get `conversations-*.json` | `--source chatgpt` |
-| Gemini web | Google Takeout → My Activity → **Gemini Apps** → Export; unzip to get `我的活动记录.html` | `--source gemini` |
+| Gemini web ⚗️ | Google Takeout → My Activity → **Gemini Apps** → Export; unzip to get `我的活动记录.html` | `--source gemini` (experimental; use manual fallback if the structure doesn't match) |
 | DeepSeek web | Avatar (bottom-left) → **System settings** → **Data management** → **Export all chat history** | `--source deepseek` |
 | Local Codex / Claude Code | Sessions live in `~/.codex/sessions`, `~/.claude/projects` | `--source local` (auto-discovery) |
 

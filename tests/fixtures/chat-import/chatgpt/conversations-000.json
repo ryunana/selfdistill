@@ -48,8 +48,48 @@
           "create_time": 1750000005
         },
         "parent": "m1",
+        "children": [
+          "m3",
+          "m3b"
+        ]
+      },
+      "m3": {
+        "id": "m3",
+        "message": {
+          "id": "m3",
+          "author": {
+            "role": "user"
+          },
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[SIMULATED] 那滤杯选哪种？"
+            ]
+          },
+          "create_time": 1750000010
+        },
+        "parent": "m2",
+        "children": []
+      },
+      "m3b": {
+        "id": "m3b",
+        "message": {
+          "id": "m3b",
+          "author": {
+            "role": "user"
+          },
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[SIMULATED] 那滤杯选哪种牌子？（重写分支，应被忽略）"
+            ]
+          },
+          "create_time": 1750000011
+        },
+        "parent": "m2",
         "children": []
       }
-    }
+    },
+    "current_node": "m3"
   }
 ]

@@ -1,7 +1,7 @@
 # selfdistill 全来源自动导入器设计
 
-日期：2026-08-18  
-状态：架构方向已批准，待用户复核书面设计  
+日期：2026-08-18
+状态：架构方向已批准，待用户复核书面设计
 基线：GitHub `main` 提交 `dc78c65`（PR #3 DSH 支持已合并）
 
 ## 1. 结论
@@ -86,7 +86,7 @@ python3 import_chats.py --source local --path ~/.codex/sessions     # 覆盖默�
 ```
 
 - 时间缺失标 `（未知）`；message_id 缺失用文件内序号（如 `#17`），**绝不补造**；
-- DeepSeek `THINK` 片段**默认归入 assistant 正文**（推理也是模型输出），在其前加一行 `<!-- thinking -->` 注释便于区分，`--no-thinking` 可排除；`FILE` 片段记为 `[附件: <file_name>]`；
+- DeepSeek `THINK` 推理片段**默认排除**（模型猜测/中间假设不可靠），`--include-thinking` 才纳入（带 `<!-- thinking -->` 注释）；`FILE` 片段记为 `[附件: <file_name>]`；`SEARCH`/`TOOL_SEARCH`/`TOOL_OPEN` 工具片段已识别并计数报告，不纳入正文；
 - 保持原始文本，不做任何改写或脱敏（脱敏是后续增量的独立能力）。
 
 ## 7. 错误处理

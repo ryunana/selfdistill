@@ -104,7 +104,7 @@ python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--
 | 来源 | 导出入口速查 | 自动导入 |
 |------|--------------|----------|
 | ChatGPT 网页 | 左下角头像 → 设置 → **数据管理** → 导出数据；解压后得到 `conversations-*.json` | `--source chatgpt` |
-| Gemini 网页 | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` | `--source gemini` |
+| Gemini 网页 ⚗️ | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` | `--source gemini`（实验性，结构不符时请手工整理） |
 | DeepSeek 网页 | 左下角头像 → **系统设置** → **数据管理** → **导出所有历史对话** | `--source deepseek` |
 | 本机 Codex / Claude Code | 会话保存在 `~/.codex/sessions`、`~/.claude/projects` | `--source local`（自动发现） |
 

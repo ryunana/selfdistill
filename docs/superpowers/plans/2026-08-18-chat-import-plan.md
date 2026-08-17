@@ -1,9 +1,9 @@
 # selfdistill 全来源自动导入器实施计划
 
-日期：2026-08-18  
-状态：待执行  
-设计依据：`docs/superpowers/specs/2026-08-18-chat-import-design.md`  
-代码基线：`9346482`（设计文档提交）  
+日期：2026-08-18
+状态：待执行
+设计依据：`docs/superpowers/specs/2026-08-18-chat-import-design.md`
+代码基线：`9346482`（设计文档提交）
 当前分支：`feat/chat-import`
 
 ## 1. 交付目标
