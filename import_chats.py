@@ -319,15 +319,25 @@ def parse_chatgpt(path: Path) -> tuple:
                 skipped.append(("—", "会话 mapping 结构损坏"))
                 continue
             valid = []
+            unknown_role_nodes: set[str] = set()
+            known_internal_role_nodes: set[str] = set()
             for node_path in paths:
                 msgs = []
                 unknown_parts = 0
                 excluded_internal = 0
                 for nid in node_path:
                     node = mapping[nid]
-                    msg = node.get("message") or {}
-                    role = str(((msg.get("author") or {}).get("role") or "")).lower()
+                    if not isinstance(node.get("message"), dict):
+                        continue
+                    msg = node["message"]
+                    author = msg.get("author") if isinstance(msg.get("author"), dict) else {}
+                    raw_role = author.get("role")
+                    role = raw_role.lower() if isinstance(raw_role, str) else ""
+                    if role in ("system", "tool"):
+                        known_internal_role_nodes.add(nid)
+                        continue
                     if role not in ("user", "assistant"):
+                        unknown_role_nodes.add(nid)
                         continue
                     content = msg.get("content") or {}
                     content_kind = str(content.get("content_type") or content.get("type") or "").lower()
@@ -348,6 +358,10 @@ def parse_chatgpt(path: Path) -> tuple:
                                     f"内部内容已排除：ChatGPT reasoning {excluded_internal} 个"))
                 else:
                     skipped.append(("—", SKIP_EMPTY))
+                for _ in unknown_role_nodes:
+                    skipped.append(("—", "未知 ChatGPT 消息角色"))
+                for _ in known_internal_role_nodes:
+                    skipped.append(("—", "内部内容已排除：ChatGPT 已知消息角色"))
                 continue
             branching = not has_valid_current and len(valid) > 1
             for index, (node_path, msgs, unknown_parts, excluded_internal) in enumerate(valid, 1):
@@ -361,6 +375,10 @@ def parse_chatgpt(path: Path) -> tuple:
                     skipped.append((cid, f"未识别 ChatGPT 附件 {unknown_parts} 个"))
                 if excluded_internal:
                     skipped.append((cid, f"内部内容已排除：ChatGPT reasoning {excluded_internal} 个"))
+            for _ in unknown_role_nodes:
+                skipped.append(("—", "未知 ChatGPT 消息角色"))
+            for _ in known_internal_role_nodes:
+                skipped.append(("—", "内部内容已排除：ChatGPT 已知消息角色"))
     return convs, skipped, total
 
 
@@ -419,7 +437,10 @@ class _GeminiActivityExtractor(HTMLParser):
             is_time_field = (tag == "div" and (("content-cell" in classes
                               and "mdl-typography--body-1" in classes)
                              or "header-cell" in classes))
-            is_provider_field = tag == "div" and "content-cell" in classes and "mdl-typography--body-1" in classes
+            is_current_provider_field = tag == "div" and "content-cell" in classes and "mdl-typography--body-1" in classes
+            is_legacy_provider_label = (tag == "div" and len(self._tags) == 2 and re.match(
+                r"^(?:Prompted|Gemini)(?:\s*[:：]\s*|\s*$)", data.strip(), re.I))
+            is_provider_field = is_current_provider_field or bool(is_legacy_provider_label)
             # Google chrome is emitted inside header/caption containers.  The
             # identical words in a normal nested body node are user/answer text.
             is_chrome = bool({"header-cell", "mdl-typography--caption"}.intersection(ancestor_classes))
@@ -445,10 +466,13 @@ def _gemini_visible_text(lines: list[str], marker: str, metadata_indexes: Option
     for index, line in enumerate(lines):
         if index in metadata_indexes or index in chrome_indexes:
             continue
-        line = marker_re.sub("", line).strip()
-        if index in provider_indexes and re.match(rf"^{re.escape(marker)}\s+", line, re.I):
-            line = re.sub(rf"^{re.escape(marker)}\s+", "", line, flags=re.I)
-        if line and line.lower() not in ("gemini", "prompted"):
+        if index in provider_indexes:
+            line = marker_re.sub("", line).strip()
+            if re.match(rf"^{re.escape(marker)}\s+", line, re.I):
+                line = re.sub(rf"^{re.escape(marker)}\s+", "", line, flags=re.I)
+        # A bare provider word is structural only when the extractor proved
+        # that this field is provider-owned; ordinary nested body text wins.
+        if line and (index not in provider_indexes or line.lower() not in ("gemini", "prompted")):
             out.append(line)
     return "\n".join(out).strip()
 
@@ -470,7 +494,7 @@ def _gemini_user_text(lines: list[str], provider_indexes: Optional[set[int]] = N
         # Date-like text inside a prompt is legitimate user content.
         if index in chrome_indexes:
             continue
-        if re.match(r"^Prompted(?:\s*[:：]\s*|\s*$)", line, re.I):
+        if index in provider_indexes and re.match(r"^Prompted(?:\s*[:：]\s*|\s*$)", line, re.I):
             line = re.sub(r"^Prompted(?:\s*[:：]\s*|\s*$)", "", line, flags=re.I)
         elif index in provider_indexes and re.match(r"^Prompted\s+", line, re.I):
             line = re.sub(r"^Prompted\s+", "", line, flags=re.I)
@@ -499,16 +523,17 @@ def parse_gemini(path: Path) -> tuple:
     activities = []
     pending = None
     for lines, structural_time_indexes, provider_indexes, chrome_indexes in parser.blocks:
-        is_prompt = any(re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
-                        or (i in provider_indexes and re.match(r"^Prompted\s+", line, re.I))
+        is_prompt = any(i in provider_indexes and (re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
+                        or re.match(r"^Prompted\s+", line, re.I))
                         for i, line in enumerate(lines))
-        is_legacy_answer = any(re.match(r"^Gemini(?:\s*[:：]|\s*$)", line, re.I) for line in lines)
+        is_legacy_answer = any(i in provider_indexes and re.match(r"^Gemini(?:\s*[:：]|\s*$)", line, re.I)
+                               for i, line in enumerate(lines))
         if is_prompt:
             if pending is not None:
                 activities.append(pending)
             prompt_index = next(i for i, line in enumerate(lines)
-                                if re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
-                                or (i in provider_indexes and re.match(r"^Prompted\s+", line, re.I)))
+                                if i in provider_indexes and (re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
+                                or re.match(r"^Prompted\s+", line, re.I)))
             timestamp_indexes = [i for i in structural_time_indexes if i > prompt_index
                                  and _TIME_FIELD.fullmatch(lines[i])]
             # Bind only direct content-cell/body-1 timestamp fields. Dates in
@@ -855,7 +880,7 @@ def _codex_text_with_events(content, events: Optional[list[str]]) -> str:
     for c in content or []:
         if not isinstance(c, dict):
             if events is not None:
-                events.append("未知内部记录告警：Codex 未识别内容块")
+                events.append("未知 Codex 内容块类型")
             continue
         raw_ctype = c.get("type")
         ctype = raw_ctype.lower() if isinstance(raw_ctype, str) else ""
@@ -869,7 +894,7 @@ def _codex_text_with_events(content, events: Optional[list[str]]) -> str:
         elif ctype in ("input_image", "output_image", "image"):
             parts.append("[图片]")
         elif events is not None:
-            events.append(f"未知内部记录告警：Codex 未识别内容块 {ctype or '?'}")
+            events.append("未知 Codex 内容块类型")
     return "\n".join(parts).strip()
 
 
@@ -934,8 +959,15 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
                     continue
                 if payload.get("type") != "message":
                     continue
-                role = str(payload.get("role") or "").lower()
+                raw_role = payload.get("role")
+                role = raw_role.lower() if isinstance(raw_role, str) else ""
+                if role in ("developer", "system"):
+                    if events is not None:
+                        events.append("内部内容已排除：Codex developer/system 消息")
+                    continue
                 if role not in ("user", "assistant"):
+                    if events is not None:
+                        events.append("未知 Codex 消息角色")
                     continue
                 content = payload.get("content")
                 if content is not None and not isinstance(content, list):
@@ -995,9 +1027,14 @@ def _claude_content_text(content, events: Optional[list[str]]) -> tuple[str, boo
     for block in content:
         if not isinstance(block, dict):
             if events is not None:
-                events.append("未知内部记录告警：Claude 非对象内容块")
+                events.append("未知 Claude 内容块类型")
             continue
-        block_type = str(block.get("type") or "")
+        raw_block_type = block.get("type")
+        block_type = raw_block_type if isinstance(raw_block_type, str) else ""
+        if not block_type:
+            if events is not None:
+                events.append("未知 Claude 内容块类型")
+            continue
         if block_type == "text":
             text = block.get("text")
             if not isinstance(text, str):
@@ -1012,7 +1049,7 @@ def _claude_content_text(content, events: Optional[list[str]]) -> tuple[str, boo
             if events is not None:
                 events.append(f"内部内容已排除：Claude {block_type} 内容块")
         elif events is not None:
-            events.append(f"未知内部记录告警：Claude 内容块 type={block_type or '?'}")
+            events.append("未知 Claude 内容块类型")
     return "\n".join(parts).strip(), True
 
 
@@ -1057,7 +1094,7 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                         if dtype in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
                             events.append("内部内容已排除：Claude 已知非消息记录")
                         else:
-                            events.append(f"未知内部记录告警：Claude type={d.get('type') or '?'}")
+                            events.append("未知 Claude 顶层记录类型")
                     continue
                 raw_message = d.get("message")
                 if raw_message is not None and not isinstance(raw_message, dict):
@@ -1069,8 +1106,11 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                     if events is not None:
                         events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 message 不是对象")
                     continue
-                role = str(m.get("role") or d.get("type")).lower()
+                raw_role = m.get("role", dtype)
+                role = raw_role.lower() if isinstance(raw_role, str) else ""
                 if role not in ("user", "assistant"):
+                    if events is not None:
+                        events.append("未知 Claude 消息角色")
                     continue
                 content = m.get("content")
                 if content is not None and not isinstance(content, (str, list)):

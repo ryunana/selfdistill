@@ -406,6 +406,115 @@ class ParserTests(unittest.TestCase):
             self.assertIsNone(ic.parse_claude(claude, events))
             self.assertTrue(any("text 不是字符串" in event and not ic._is_expected_exclusion(event) for event in events))
 
+    def test_unknown_roles_and_types_are_generic_non_expected_failures(self) -> None:
+        """Parser events must be actionable without carrying raw export values."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            secret = "raw-type-secret"
+
+            chatgpt = root / "conversations-000.json"
+            chatgpt.write_text(json.dumps([{"id": "safe", "mapping": {
+                "root": {"parent": None, "children": ["system"]},
+                "system": {"parent": "root", "children": ["tool"], "message": {
+                    "author": {"role": "system"}, "content": {"parts": ["internal"]}}},
+                "tool": {"parent": "system", "children": ["bad"], "message": {
+                    "author": {"role": "tool"}, "content": {"parts": ["internal"]}}},
+                "bad": {"parent": "tool", "children": ["answer"], "message": {
+                    "author": {"role": {"secret": secret}}, "content": {"parts": ["hidden"]}}},
+                "answer": {"parent": "bad", "children": [], "message": {
+                    "author": {"role": "assistant"}, "content": {"parts": ["visible"]}}},
+            }}]), encoding="utf-8")
+            chat_convs, chat_skipped, _total = ic.parse_chatgpt(chatgpt)
+            self.assertEqual(len(chat_convs), 1)
+            self.assertIn("未知 ChatGPT 消息角色", [reason for _ref, reason in chat_skipped])
+            self.assertEqual(sum(reason == "内部内容已排除：ChatGPT 已知消息角色"
+                                 for _ref, reason in chat_skipped), 2)
+
+            codex = root / "rollout.jsonl"
+            codex.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                    {"type": secret}, {"type": {"secret": secret}},
+                    {"type": "input_text", "text": "visible"},
+                ]}},
+                {"type": "response_item", "payload": {"type": "message", "role": secret,
+                                                            "content": []}},
+                {"type": "response_item", "payload": {"type": "message", "role": "developer",
+                                                            "content": []}},
+                {"type": "response_item", "payload": {"type": "message", "role": "system",
+                                                            "content": []}},
+            ]), encoding="utf-8")
+            codex_events = []
+            self.assertIsNotNone(ic.parse_codex(codex, codex_events))
+            self.assertIn("未知 Codex 内容块类型", codex_events)
+            self.assertIn("未知 Codex 消息角色", codex_events)
+            self.assertEqual(sum(event == "内部内容已排除：Codex developer/system 消息"
+                                 for event in codex_events), 2)
+
+            claude = root / "claude.jsonl"
+            claude.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "user", "message": {"role": "user", "content": [
+                    {"type": secret}, {"type": {"secret": secret}},
+                    {"type": "text", "text": "visible"},
+                ]}},
+                {"type": "user", "message": {"role": secret, "content": "hidden"}},
+                {"type": secret, "payload": {}},
+            ]), encoding="utf-8")
+            claude_events = []
+            self.assertIsNotNone(ic.parse_claude(claude, claude_events))
+            self.assertIn("未知 Claude 内容块类型", claude_events)
+            self.assertIn("未知 Claude 消息角色", claude_events)
+            self.assertIn("未知 Claude 顶层记录类型", claude_events)
+
+            deepseek = root / "conversations.json"
+            deepseek.write_text(json.dumps([{"id": "safe", "mapping": {
+                "root": {"parent": None, "children": [], "message": {"fragments": [
+                    {"type": "REQUEST", "content": "visible"}, {"type": secret, "content": "hidden"},
+                ]}},
+            }}]), encoding="utf-8")
+            deep_convs, deep_skipped, _total = ic.parse_deepseek(deepseek)
+            self.assertEqual(len(deep_convs), 1)
+            self.assertIn("未识别 DeepSeek 片段", [reason for _ref, reason in deep_skipped])
+            deepseek.write_text(json.dumps([{"id": "safe", "mapping": {
+                "root": {"parent": None, "children": [], "message": {"fragments": [
+                    {"type": {"secret": secret}, "content": "hidden"},
+                ]}},
+            }}]), encoding="utf-8")
+            nested_convs, nested_skipped, _total = ic.parse_deepseek(deepseek)
+            self.assertEqual(nested_convs, [])
+            self.assertIn("会话片段 type 结构损坏", [reason for _ref, reason in nested_skipped])
+
+            failures = (chat_skipped + [("—", reason) for reason in codex_events + claude_events]
+                        + deep_skipped + nested_skipped)
+            for reason in ("未知 ChatGPT 消息角色", "未知 Codex 消息角色",
+                           "未知 Claude 消息角色", "未识别 DeepSeek 片段"):
+                self.assertTrue(any(event == reason and not ic._is_expected_exclusion(event)
+                                    for _ref, event in failures))
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(4, 4, 0, 0, 0, failures, "local", False)
+            self.assertNotIn(secret, stream.getvalue())
+
+    def test_chatgpt_shared_branch_role_events_are_counted_per_mapping_node(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            def message(role, text):
+                return {"author": {"role": role}, "content": {"parts": [text]}}
+            p.write_text(json.dumps([{"id": "shared", "current_node": "missing", "mapping": {
+                "root": {"parent": None, "children": ["system"]},
+                "system": {"parent": "root", "children": ["tool"], "message": message("system", "internal")},
+                "tool": {"parent": "system", "children": ["unknown-a"], "message": message("tool", "internal")},
+                "unknown-a": {"parent": "tool", "children": ["unknown-b"], "message": message("future", "internal")},
+                "unknown-b": {"parent": "unknown-a", "children": ["user"], "message": message([], "internal")},
+                "user": {"parent": "unknown-b", "children": ["left", "right"], "message": message("user", "prompt")},
+                "left": {"parent": "user", "children": [], "message": message("assistant", "left")},
+                "right": {"parent": "user", "children": [], "message": message("assistant", "right")},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            reasons = [reason for _ref, reason in skipped]
+            self.assertEqual(len(convs), 2)
+            self.assertEqual(sum(reason == "内部内容已排除：ChatGPT 已知消息角色" for reason in reasons), 2)
+            self.assertEqual(sum(reason == "未知 ChatGPT 消息角色" for reason in reasons), 2)
+
     def test_claude_non_string_type_is_structured_failure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "c.jsonl"
@@ -559,7 +668,7 @@ class ParserTests(unittest.TestCase):
             claude_convs = ic.parse_claude(claude, claude_events)
             self.assertEqual([m[2] for m in claude_convs[0][4]], ["real"])
             self.assertGreaterEqual(sum(reason.startswith("内部内容已排除") for reason in claude_events), 4)
-            self.assertTrue(any(reason.startswith("未知内部记录告警") for reason in claude_events))
+            self.assertIn("未知 Claude 顶层记录类型", claude_events)
 
     def test_claude_known_top_level_internal_types_are_expected_exclusions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -578,10 +687,9 @@ class ParserTests(unittest.TestCase):
             convs = ic.parse_claude(p, events)
             self.assertEqual([m[2] for m in convs[0][4]], ["real"])
             expected = [reason for reason in events if reason.startswith("内部内容已排除")]
-            unknown = [reason for reason in events if reason.startswith("未知内部记录告警")]
+            unknown = [reason for reason in events if reason == "未知 Claude 顶层记录类型"]
             self.assertEqual(len(expected), len(known_types))
             self.assertEqual(len(unknown), 1)
-            self.assertIn("future-internal", unknown[0])
 
     def test_claude_known_content_blocks_are_expected_exclusions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -601,7 +709,7 @@ class ParserTests(unittest.TestCase):
             self.assertEqual([m[2] for m in convs[0][4]], ["mixed", "real"])
             self.assertEqual(convs[0][4][0][3], "可见回答")
             self.assertEqual(sum(reason.startswith("内部内容已排除") for reason in events), 3)
-            self.assertEqual(sum(reason.startswith("未知内部记录告警") for reason in events), 1)
+            self.assertEqual(sum(reason == "未知 Claude 内容块类型" for reason in events), 1)
 
     def test_claude_image_content_block_uses_safe_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -736,9 +844,11 @@ class ParserTests(unittest.TestCase):
             self.assertIn("2026年8月5日 上午9:00", convs[0][4][1][3])
 
     def test_gemini_only_strips_structural_labels(self) -> None:
-        self.assertEqual(ic._gemini_user_text(["Prompted：正文"]), "正文")
+        self.assertEqual(ic._gemini_user_text(["Prompted：正文"], {0}), "正文")
+        self.assertEqual(ic._gemini_user_text(["Prompted：正文"]), "Prompted：正文")
         self.assertEqual(ic._gemini_user_text(["Prompted by a person"]), "Prompted by a person")
-        self.assertEqual(ic._gemini_answer_text(["Gemini：回答", "Gemini can help"]), "回答\nGemini can help")
+        self.assertEqual(ic._gemini_answer_text(["Gemini：回答", "Gemini can help"],
+                                                 provider_indexes={0}), "回答\nGemini can help")
 
     def test_gemini_direct_no_colon_prompted_label_is_structural(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -752,6 +862,18 @@ class ParserTests(unittest.TestCase):
             msgs = convs[0][4]
             self.assertEqual(msgs[0][3], "actual prompt")
             self.assertEqual(msgs[1][3], "Gemini can help with this.")
+
+    def test_gemini_nested_colon_answer_is_not_provider_label(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：question</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><p>Gemini: this is visible</p></div></div>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            self.assertEqual(convs[0][4][0][3], "question")
+            self.assertEqual(convs[0][4][1][3], "Gemini: this is visible")
 
     def test_gemini_removes_chrome_only_from_proven_metadata_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
