@@ -99,12 +99,16 @@ python3 import_chats.py --source chatgpt  --path <导出目录>
 python3 import_chats.py --source gemini   --path <Takeout 解压目录>
 python3 import_chats.py --source deepseek --path <conversations.json 或 zip>
 python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--dry-run]
+# local --path 指向混合 JSONL 目录时：
+python3 import_chats.py --source local --path <目录> --local-format auto|codex|claude --dry-run
 ```
+
+导入器会把 Gemini 的每次 `Prompted` 活动单独输出；ChatGPT/DeepSeek 的分支会拆成独立会话，而不是拼成假对话。图片和授权附件只保留可读占位，模型思考、工具过程与已知本机内部注入不会进入 Markdown。`--dry-run` 会完整解析并显示预计新导入、更新、重复和失败数，但不会创建文件。退出码 `0` 表示成功（含预期内部内容排除），`2` 表示部分成功，`1` 表示全部失败或致命错误。
 
 | 来源 | 导出入口速查 | 自动导入 |
 |------|--------------|----------|
 | ChatGPT 网页 | 左下角头像 → 设置 → **数据管理** → 导出数据；解压后得到 `conversations-*.json` | `--source chatgpt` |
-| Gemini 网页 ⚗️ | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` | `--source gemini`（实验性，结构不符时请手工整理） |
+| Gemini 网页 ⚗️ | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` | `--source gemini`（每个 Prompted 活动一份会话；活动容器不可靠时停止并改用手工整理） |
 | DeepSeek 网页 | 左下角头像 → **系统设置** → **数据管理** → **导出所有历史对话** | `--source deepseek` |
 | 本机 Codex / Claude Code | 会话保存在 `~/.codex/sessions`、`~/.claude/projects` | `--source local`（自动发现） |
 

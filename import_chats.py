@@ -104,9 +104,22 @@ def today_str() -> str:
 
 # ---------- 解析器公共 ----------
 
+def _normalize_message_text(text: str) -> str:
+    """Use LF internally so cross-platform exports compare to rendered Markdown."""
+    return str(text).replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _stable_id(role: str, t: Optional[str], text: str) -> str:
     """稳定消息 id：无真实 id 时用内容指纹，保证增量去重不随行号漂移。"""
-    return "fp-" + hashlib.sha1(f"{role}|{t or ''}|{text}".encode("utf-8")).hexdigest()[:12]
+    return "fp-" + hashlib.sha1(
+        f"{role}|{t or ''}|{_normalize_message_text(text)}".encode("utf-8")).hexdigest()[:12]
+
+
+def _occurrence_id(role: str, raw_timestamp, line_ordinal: int, text: str) -> str:
+    """Fallback for append-only local JSONL records that have no native message ID."""
+    return "fp-" + hashlib.sha1(
+        f"{role}|{raw_timestamp or ''}|{line_ordinal}|{_normalize_message_text(text)}".encode("utf-8")
+    ).hexdigest()[:12]
 
 
 def _make_conversation(source: str, cid: str, title: str, msgs: list) -> tuple:
@@ -120,10 +133,113 @@ def _sanitize_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "conversation"
 
 
+def _path_fingerprint(path: list[str]) -> str:
+    return hashlib.sha1("\x1f".join(path).encode("utf-8")).hexdigest()[:12]
+
+
+def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
+    """Return validated parent-linked paths.  A tree error must not be flattened."""
+    if not isinstance(mapping, dict) or not mapping:
+        raise ImportError_("会话 mapping 为空或结构损坏")
+    nodes = {str(nid): node for nid, node in mapping.items() if isinstance(node, dict)}
+    if not nodes:
+        raise ImportError_("会话 mapping 没有有效节点")
+    children: dict[str, list[str]] = {nid: [] for nid in nodes}
+    for nid, node in nodes.items():
+        parent = node.get("parent")
+        if parent is None:
+            continue
+        parent = str(parent)
+        if parent not in nodes:
+            raise ImportError_(f"会话 mapping 存在断链：{nid} 的 parent {parent} 不存在")
+        children[parent].append(nid)
+    for nid, node in nodes.items():
+        declared = node.get("children") or []
+        if not isinstance(declared, list):
+            raise ImportError_(f"会话 mapping 的 children 不是列表：{nid}")
+        for child in declared:
+            child = str(child)
+            if child not in nodes:
+                raise ImportError_(f"会话 mapping 存在断链：{nid} 的 child {child} 不存在")
+            if str(nodes[child].get("parent")) != nid:
+                raise ImportError_(f"会话 mapping 的 parent/children 不一致：{nid} → {child}")
+        if set(map(str, declared)) != set(children[nid]):
+            raise ImportError_(f"会话 mapping 的 parent/children 不一致：{nid}")
+    for start in nodes:
+        seen = set()
+        nid: Optional[str] = start
+        while nid is not None:
+            if nid in seen:
+                raise ImportError_(f"会话 mapping 存在循环：{nid}")
+            seen.add(nid)
+            parent = nodes[nid].get("parent")
+            nid = str(parent) if parent is not None else None
+    leaves = sorted(nid for nid, kids in children.items() if not kids)
+    if not leaves:
+        raise ImportError_("会话 mapping 没有叶子节点（可能存在循环）")
+    paths = []
+    for leaf in leaves:
+        chain = []
+        seen = set()
+        nid: Optional[str] = leaf
+        while nid is not None:
+            if nid in seen:
+                raise ImportError_(f"会话 mapping 存在循环：{nid}")
+            seen.add(nid)
+            chain.append(nid)
+            parent = nodes[nid].get("parent")
+            nid = str(parent) if parent is not None else None
+        paths.append(list(reversed(chain)))
+    return paths
+
+
+def _path_to_node(mapping: dict, node_id: str) -> list[str]:
+    """Validate and return the path ending at the explicitly active node."""
+    nodes = {str(nid): node for nid, node in mapping.items() if isinstance(node, dict)}
+    if node_id not in nodes:
+        raise ImportError_("current_node 不存在或不是有效节点")
+    chain = []
+    seen = set()
+    nid: Optional[str] = node_id
+    while nid is not None:
+        if nid in seen:
+            raise ImportError_(f"会话 mapping 存在循环：{nid}")
+        seen.add(nid)
+        chain.append(nid)
+        parent = nodes[nid].get("parent")
+        if parent is not None and str(parent) not in nodes:
+            raise ImportError_(f"会话 mapping 存在断链：{nid} 的 parent {parent} 不存在")
+        nid = str(parent) if parent is not None else None
+    return list(reversed(chain))
+
+
+def _chatgpt_parts(parts) -> tuple[str, int]:
+    """Render only known human-safe ChatGPT parts; never stringify structures."""
+    rendered: list[str] = []
+    unknown = 0
+    for part in parts or []:
+        if isinstance(part, str):
+            if part.strip():
+                rendered.append(part)
+        elif isinstance(part, dict):
+            kind = str(part.get("content_type") or part.get("type") or "").lower()
+            if ("image" in kind or "asset_pointer" in part or "image_asset_pointer" in part):
+                rendered.append("[图片]")
+            elif kind in ("thoughts", "reasoning_recap", "reasoning"):
+                continue
+            else:
+                rendered.append("[未识别附件]")
+                unknown += 1
+        elif part is not None:
+            rendered.append("[未识别附件]")
+            unknown += 1
+    return "\n".join(rendered).strip(), unknown
+
+
 # ---------- 解析器：ChatGPT（沿活动路径，不压平分支） ----------
 
 def parse_chatgpt(path: Path) -> tuple:
-    """conversations-*.json：沿 current_node 的 parent 链取活动路径；无 current_node 时回退按时间。"""
+    """Use current_node, otherwise preserve each complete branch rather than flattening."""
     files = sorted(path.glob("conversations-*.json")) if path.is_dir() else [path]
     if not files:
         raise ImportError_(f"未找到 conversations-*.json：{path}")
@@ -136,159 +252,219 @@ def parse_chatgpt(path: Path) -> tuple:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
             skipped.append((f.name, SKIP_BAD))
             continue
+        if not isinstance(data, list):
+            skipped.append((f.name, SKIP_BAD))
+            continue
         total += len(data or [])
         for conv in data or []:
             mapping = conv.get("mapping") or {}
-            msgs = []
             current = conv.get("current_node")
-            if current and current in mapping:
-                node = mapping.get(current)
-                chain = []
-                while node and isinstance(node, dict):
-                    msg = node.get("message")
-                    if msg:
-                        role = str(((msg.get("author") or {}).get("role") or "")).lower()
-                        if role in ("user", "assistant"):
-                            parts = (msg.get("content") or {}).get("parts") or []
-                            text = "\n".join(str(p) for p in parts if p is not None).strip()
-                            if text:
-                                mid = str(msg.get("id") or node.get("id")) or _stable_id(role, None, text)
-                                chain.append((role, fmt_time(msg.get("create_time")), mid, text))
-                    parent = node.get("parent")
-                    node = mapping.get(parent) if parent else None
-                msgs = list(reversed(chain))
-            else:
-                for nid, node in mapping.items():
-                    msg = (node or {}).get("message")
-                    if not msg:
-                        continue
+            has_valid_current = bool(current and str(current) in mapping)
+            try:
+                paths = ([_path_to_node(mapping, str(current))]
+                         if has_valid_current else _root_to_leaf_paths(mapping))
+            except ImportError_ as e:
+                skipped.append((conv.get("title") or conv.get("id") or "?", str(e)))
+                continue
+            valid = []
+            for node_path in paths:
+                msgs = []
+                unknown_parts = 0
+                for nid in node_path:
+                    node = mapping[nid]
+                    msg = node.get("message") or {}
                     role = str(((msg.get("author") or {}).get("role") or "")).lower()
                     if role not in ("user", "assistant"):
                         continue
-                    parts = (msg.get("content") or {}).get("parts") or []
-                    text = "\n".join(str(p) for p in parts if p is not None).strip()
+                    content = msg.get("content") or {}
+                    text, unknown = _chatgpt_parts(content.get("parts"))
+                    unknown_parts += unknown
                     if not text:
                         continue
                     mid = str(msg.get("id") or nid) or _stable_id(role, None, text)
                     msgs.append((role, fmt_time(msg.get("create_time")), mid, text))
-                msgs.sort(key=lambda m: (m[1] or "9999", m[2] or ""))
-            if not msgs:
+                if msgs:
+                    valid.append((node_path, msgs, unknown_parts))
+            if not valid:
                 skipped.append((conv.get("title") or conv.get("id") or "?", SKIP_EMPTY))
                 continue
-            convs.append(_make_conversation("chatgpt", conv.get("id") or f.stem,
-                                            conv.get("title") or "未命名会话", msgs))
+            branching = not has_valid_current and len(valid) > 1
+            for index, (node_path, msgs, unknown_parts) in enumerate(valid, 1):
+                base = str(conv.get("id") or f.stem)
+                cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
+                title = str(conv.get("title") or "未命名会话")
+                if branching:
+                    title += f"（分支 {index}）"
+                convs.append(_make_conversation("chatgpt", cid, title, msgs))
+                if unknown_parts:
+                    skipped.append((cid, f"内部内容已排除：未识别附件 {unknown_parts} 个"))
     return convs, skipped, total
 
 
 # ---------- 解析器：Gemini Takeout（按真实结构） ----------
-
-class _TextExtractor(HTMLParser):
-    BLOCK = {"div", "p", "br", "li", "h1", "h2", "h3", "h4", "h5", "tr", "section", "article"}
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._skip_depth = 0
-
-    def handle_starttag(self, tag, attrs):
-        if tag in ("script", "style", "noscript"):
-            self._skip_depth += 1
-        if tag in self.BLOCK and self.parts and not self.parts[-1].endswith("\n"):
-            self.parts.append("\n")
-
-    def handle_endtag(self, tag):
-        if tag in ("script", "style", "noscript") and self._skip_depth > 0:
-            self._skip_depth -= 1
-        if tag in self.BLOCK and self.parts and not self.parts[-1].endswith("\n"):
-            self.parts.append("\n")
-
-    def handle_data(self, data):
-        if self._skip_depth == 0:
-            text = data.strip()
-            if text:
-                self.parts.append(text)
-
-    def text(self) -> str:
-        return "\n".join(self.parts)
-
 
 _GEMINI_DROP_LINES = re.compile(
     r"^(Gemini Apps|商品：|详细信息：|为什么此处会显示此活动记录？|此处|控制这些设置)$")
 _GEMINI_URL_LINE = re.compile(r"^https?://gemini\.google\.com/")
 
 
+class _GeminiActivityExtractor(HTMLParser):
+    """Capture Takeout's visible activity containers without joining independent rows."""
+    _BLOCK = {"div", "p", "br", "li", "tr", "section", "article"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[list[str]] = []
+        self._parts: list[str] = []
+        self._depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        classes = " ".join(value for key, value in attrs if key == "class")
+        if self._depth == 0 and tag == "div" and ("outer-cell" in classes or "activity-container" in classes):
+            self._depth = 1
+            self._parts = []
+            return
+        if self._depth and tag not in ("br", "img", "meta", "link", "input", "hr"):
+            self._depth += 1
+            if tag in self._BLOCK:
+                self._parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if not self._depth:
+            return
+        if tag in ("br", "img", "meta", "link", "input", "hr"):
+            return
+        if tag in self._BLOCK:
+            self._parts.append("\n")
+        self._depth -= 1
+        if self._depth == 0:
+            text = "".join(self._parts)
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if lines:
+                self.blocks.append(lines)
+
+    def handle_data(self, data):
+        if self._depth and data.strip():
+            # Takeout's adjacent data nodes are semantic fields, not one sentence.
+            self._parts.append("\n" + data.strip() + "\n")
+
+
+def _gemini_time(lines: list[str]) -> Optional[str]:
+    for line in lines:
+        m = _TIME_LINE.search(line)
+        if m:
+            return fmt_time(m.group(0))
+    return None
+
+
+def _gemini_visible_text(lines: list[str], marker: str) -> str:
+    out = []
+    marker_re = re.compile(rf"^{marker}\s*[:：]?\s*", re.I)
+    for line in lines:
+        if _TIME_LINE.search(line) or _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
+            continue
+        line = marker_re.sub("", line).strip()
+        if line and line.lower() not in ("gemini", "prompted"):
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def _gemini_answer_text(lines: list[str]) -> str:
+    out = []
+    for line in lines:
+        if _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
+            break
+        line = re.sub(r"^Gemini\s*[:：]?\s*", "", line, flags=re.I).strip()
+        if line and line != "Gemini Apps":
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def _gemini_user_text(lines: list[str]) -> str:
+    out = []
+    attachments = False
+    for line in lines:
+        # The caller has already sliced away the one selected activity timestamp.
+        # Date-like text inside a prompt is legitimate user content.
+        if _GEMINI_DROP_LINES.match(line) or _GEMINI_URL_LINE.match(line):
+            continue
+        if re.match(r"^Prompted\s*[:：]?", line, re.I):
+            line = re.sub(r"^Prompted\s*[:：]?\s*", "", line, flags=re.I)
+        if re.match(r"^Attached\s+\d+\s+files?\.?", line, re.I):
+            attachments = True
+            continue
+        if line and line != "-":
+            out.append(f"[附件: {line}]" if attachments else line)
+    return "\n".join(out).strip()
+
+
 def parse_gemini(path: Path) -> tuple:
-    """Takeout 我的活动记录.html：Prompted 开头为用户，时间戳行后为回复；附件与元数据行按规则处理。"""
+    """Split Takeout activity containers; never invent a global conversation stream."""
     target = path if path.is_file() else next(iter(path.rglob("我的活动记录.html")), None)
     if target is None:
         raise ImportError_(f"未找到 我的活动记录.html：{path}")
     try:
-        parser = _TextExtractor()
+        parser = _GeminiActivityExtractor()
         parser.feed(target.read_text(encoding="utf-8", errors="replace"))
-        text = parser.text()
     except OSError as e:
         raise ImportError_(f"无法读取 {target}：{e}")
-    if "Prompted" not in text:
-        raise ImportError_(f"{target} 中未找到 Prompted 轮次标记（结构未能识别）")
-
-    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-
-    def is_boundary(ln: str) -> bool:
-        return (ln.lower().startswith("prompted") or _GEMINI_DROP_LINES.match(ln)
-                or _GEMINI_URL_LINE.match(ln))
-
-    msgs: list = []
-    i = 0
-    pending_header_time: Optional[str] = None
-    while i < len(lines):
-        ln = lines[i]
-        if ln.lower().startswith("prompted"):
-            # 用户消息：Prompted 行 + 后续续行，直到时间戳/附件/元数据边界
-            user_text = re.sub(r"^[Pp]rompted\s*[:：]?\s*", "", ln).strip()
-            i += 1
-            while i < len(lines):
-                nxt = lines[i]
-                if is_boundary(nxt) or _TIME_LINE.search(nxt):
-                    break
-                if nxt.lower().startswith("attached "):
-                    break
-                user_text += "\n" + nxt
-                i += 1
-            # 附件：Attached N files. 后跟文件名
-            if i < len(lines) and lines[i].lower().startswith("attached "):
-                i += 1
-                while i < len(lines) and not (_TIME_LINE.search(lines[i])
-                                              or is_boundary(lines[i])):
-                    if not _GEMINI_DROP_LINES.match(lines[i]) and lines[i] != "-":
-                        user_text += f"\n[附件: {lines[i]}]"
-                    i += 1
-            if user_text.strip():
-                msgs.append(("user", pending_header_time,
-                             _stable_id("user", None, user_text.strip()), user_text.strip()))
-            pending_header_time = None
-            continue
-        if _TIME_LINE.search(ln):
-            t = fmt_time(ln.strip())
-            i += 1
-            buf = []
-            while i < len(lines):
-                nxt = lines[i]
-                if is_boundary(nxt):
-                    break
-                buf.append(nxt)
-                i += 1
-            body = "\n".join(buf).strip()
-            if body:
-                msgs.append(("assistant", t, _stable_id("assistant", t, body), body))
-            elif t:
-                pending_header_time = t  # 无正文的时间行：作为下一条用户消息的头部时间
-            continue
-        i += 1
-
-    if not msgs:
-        raise ImportError_(f"{target} 未提取到任何 Prompted/Gemini 消息")
-    cid = target.stem or "gemini-export"
-    return [_make_conversation("gemini", cid, "Gemini 会话", msgs)], [], 1
+    if not parser.blocks:
+        raise ImportError_(f"{target} 未找到可靠的 Gemini 活动容器（请改用手工整理）")
+    activities = []
+    pending = None
+    for lines in parser.blocks:
+        joined = "\n".join(lines)
+        is_prompt = bool(re.search(r"(?:^|\n)Prompted\s*[:：]?", joined, re.I))
+        is_legacy_answer = bool(re.search(r"(?:^|\n)Gemini\s*[:：]", joined, re.I))
+        if is_prompt:
+            if pending is not None:
+                activities.append(pending)
+            prompt_index = next(i for i, line in enumerate(lines)
+                                if re.match(r"^Prompted\s*[:：]?", line, re.I))
+            timestamp_indexes = [i for i in range(prompt_index + 1, len(lines))
+                                 if _TIME_LINE.search(lines[i])]
+            # User prompts frequently contain dates.  Takeout's activity time is
+            # the final recognised time field before the visible answer.
+            timestamp_index = timestamp_indexes[-1] if timestamp_indexes else None
+            legacy_time = _gemini_time(lines[:prompt_index + 1])
+            user_lines = lines[prompt_index:timestamp_index] if timestamp_index is not None else lines[prompt_index:]
+            text = _gemini_user_text(user_lines)
+            timestamp = _gemini_time([lines[timestamp_index]]) if timestamp_index is not None else legacy_time
+            if not timestamp or not text:
+                raise ImportError_(f"{target} 存在无法可靠绑定时间或正文的 Prompted 活动（请改用手工整理）")
+            activity = {"time": timestamp, "user": text, "answer": None}
+            if timestamp_index is not None:
+                activity["answer"] = _gemini_answer_text(lines[timestamp_index + 1:])
+                activities.append(activity)
+                pending = None
+            else:
+                pending = activity
+        elif is_legacy_answer:
+            if pending is None:
+                raise ImportError_(f"{target} 存在未绑定 Prompted 的 Gemini 回答（请改用手工整理）")
+            answer = _gemini_visible_text(lines, "Gemini")
+            if answer:
+                pending["answer"] = answer
+                activities.append(pending)
+                pending = None
+        # Non-Prompted Takeout activity rows are informational and intentionally ignored.
+    if pending is not None:
+        activities.append(pending)
+    if not activities:
+        raise ImportError_(f"{target} 未提取到任何 Prompted 活动")
+    convs = []
+    activity_occurrences: dict[str, int] = {}
+    for activity in sorted(activities, key=lambda a: (a["time"], a["user"])):
+        activity_key = f"{activity['time']}\x1f{activity['user']}\x1f{activity['answer'] or ''}"
+        fingerprint = hashlib.sha1(activity_key.encode("utf-8")).hexdigest()[:16]
+        occurrence = activity_occurrences.get(activity_key, 0) + 1
+        activity_occurrences[activity_key] = occurrence
+        cid = f"activity-{fingerprint}" + (f"--occurrence-{occurrence}" if occurrence > 1 else "")
+        msgs = [("user", activity["time"], _stable_id("user", activity["time"], activity["user"]), activity["user"])]
+        if activity["answer"]:
+            msgs.append(("assistant", activity["time"], _stable_id("assistant", activity["time"], activity["answer"]), activity["answer"]))
+        convs.append(_make_conversation("gemini", cid, "Gemini 活动", msgs))
+    return convs, [], len(activities)
 
 
 # ---------- 解析器：DeepSeek ----------
@@ -319,50 +495,77 @@ def parse_deepseek(path: Path) -> tuple:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
             raise ImportError_(f"无法读取 {path}：{e}")
 
+    if not isinstance(data, list):
+        raise ImportError_("conversations.json 顶层必须是会话列表")
+
     convs = []
     skipped = []
     tool_count = 0
     total = len(data or [])
     for conv in data or []:
         mapping = conv.get("mapping") or {}
-        msgs = []
-        for nid, node in mapping.items():
-            msg = (node or {}).get("message")
-            if not msg:
-                continue
-            t = fmt_time(msg.get("inserted_at"))
-            role = None
-            text_parts: list[str] = []
-            for fr in msg.get("fragments") or []:
-                ftype = fr.get("type")
-                content = str(fr.get("content") or "").strip()
-                if ftype == "REQUEST":
-                    role = "user"
-                    if content:
-                        text_parts.append(content)
-                elif ftype == "RESPONSE":
-                    role = "assistant"
-                    if content:
-                        text_parts.append(content)
-                elif ftype == "THINK":
-                    if _INCLUDE_THINKING and content:
-                        text_parts.append("<!-- thinking -->\n" + content)
-                elif ftype == "FILE":
-                    for fi in fr.get("files") or []:
-                        text_parts.append(f"[附件: {fi.get('file_name') or fi.get('file_id')}]")
-                elif ftype in ("SEARCH", "TOOL_SEARCH", "TOOL_OPEN"):
-                    tool_count += 1  # 工具片段：已识别并计数，不纳入蒸馏正文
-                else:
-                    skipped.append((conv.get("title") or nid, SKIP_UNKNOWN))
-            if role is None or not text_parts:
-                continue
-            msgs.append((role, t, str(nid), "\n\n".join(text_parts).strip()))
-        if not msgs:
+        try:
+            paths = _root_to_leaf_paths(mapping)
+        except ImportError_ as e:
+            skipped.append((conv.get("title") or conv.get("id") or "?", str(e)))
+            continue
+        outputs = []
+        counted_fragments: set[tuple[str, int]] = set()
+        for node_path in paths:
+            msgs = []
+            for nid in node_path:
+                node = mapping[nid]
+                msg = node.get("message") or {}
+                t = fmt_time(msg.get("inserted_at"))
+                role = None
+                text_parts: list[str] = []
+                for fragment_index, fr in enumerate(msg.get("fragments") or []):
+                    if not isinstance(fr, dict):
+                        continue
+                    ftype = fr.get("type")
+                    content = str(fr.get("content") or "").strip()
+                    if ftype == "REQUEST":
+                        role = "user"
+                        if content:
+                            text_parts.append(content)
+                    elif ftype == "RESPONSE":
+                        role = "assistant"
+                        if content:
+                            text_parts.append(content)
+                    elif ftype == "THINK":
+                        if _INCLUDE_THINKING and content:
+                            text_parts.append("<!-- thinking -->\n" + content)
+                        elif content and (nid, fragment_index) not in counted_fragments:
+                            skipped.append((str(conv.get("id") or nid), "内部内容已排除：THINK"))
+                            counted_fragments.add((nid, fragment_index))
+                    elif ftype == "FILE":
+                        for fi in fr.get("files") or []:
+                            if isinstance(fi, dict):
+                                text_parts.append(f"[附件: {fi.get('file_name') or fi.get('file_id')}]")
+                    elif ftype in ("SEARCH", "TOOL_SEARCH", "TOOL_OPEN"):
+                        if (nid, fragment_index) not in counted_fragments:
+                            tool_count += 1
+                            counted_fragments.add((nid, fragment_index))
+                    else:
+                        if (nid, fragment_index) not in counted_fragments:
+                            skipped.append((conv.get("title") or nid, f"内部内容已排除：未识别片段 {ftype or '?'}"))
+                            counted_fragments.add((nid, fragment_index))
+                # Tool-only nodes retain their graph position but never become body text.
+                if role is not None and text_parts:
+                    msgs.append((role, t, str(nid), "\n\n".join(text_parts).strip()))
+            if msgs:
+                outputs.append((node_path, msgs))
+        if not outputs:
             skipped.append((conv.get("title") or conv.get("id") or "?", SKIP_EMPTY))
             continue
-        msgs.sort(key=lambda m: (m[1] or "9999", m[2] or ""))
-        convs.append(_make_conversation("deepseek", conv.get("id") or "unknown",
-                                        conv.get("title") or "未命名会话", msgs))
+        branching = len(outputs) > 1
+        for index, (node_path, msgs) in enumerate(outputs, 1):
+            base = str(conv.get("id") or "unknown")
+            cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
+            title = str(conv.get("title") or "未命名会话")
+            if branching:
+                title += f"（分支 {index}）"
+            convs.append(_make_conversation("deepseek", cid, title, msgs))
     if tool_count:
         skipped.append(("—", f"工具片段 {tool_count} 条（SEARCH/TOOL_SEARCH/TOOL_OPEN）已识别，不纳入蒸馏正文"))
     return convs, skipped, total
@@ -370,40 +573,54 @@ def parse_deepseek(path: Path) -> tuple:
 
 # ---------- 解析器：本地 Codex ----------
 
-# Codex 系统注入块标签（真实会话中出现的全部标签）
-_SYSTEM_TAGS = [
+# Only confirmed outer envelopes are removed.  Generic XML names are user content.
+_CODEX_ENVELOPE_TAGS = (
     "environment_context", "recommended_plugins", "heartbeat", "in-app-browser-context",
-    "root", "automation_id", "current_time_iso", "instructions", "current_date", "timezone",
-    "filesystem", "workspace_roots", "cwd", "shell", "INSTRUCTIONS", "special", "symbol",
-    "subcommand", "prompt", "cols", "rows", "others", "path", "CallToolResult", "skill", "name",
-    "TResult", "string", "TabClipboardEntry", "dir", "日期", "标题", "hash",
+    "skills_instructions", "plugins_instructions", "apps_instructions", "permissions_instructions",
     "external_codex_apps_writing_block_edits_part_1_of_3",
     "external_codex_apps_writing_block_edits_part_2_of_3",
     "external_codex_apps_writing_block_edits_part_3_of_3",
-]
-_SYSTEM_BLOCK_RE = [re.compile(rf"<{t}[^>]*>.*?</{t}>", re.S) for t in _SYSTEM_TAGS]
+)
+_CODEX_ENVELOPE_RE = [re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", re.I | re.S)
+                      for tag in _CODEX_ENVELOPE_TAGS]
 _IMAGE_TAG_RE = re.compile(r"<image[^>]*>.*?</image>|<image[^>]*>", re.S)
-_SYSTEM_LINE_PREFIX = ("# AGENTS.md instructions", "# Files mentioned by the user:",
-                       "# In app browser:", "Automation:")
-_ABORT_LINE = re.compile(r"^<turn_aborted>\s*$")
+_CODEX_AGENTS_RE = re.compile(
+    r"^\s*#\s*AGENTS\.md instructions[^\n]*\n\s*<INSTRUCTIONS\b[^>]*>.*?</INSTRUCTIONS>\s*",
+    re.I | re.S)
+_CODEX_ABORT_RE = re.compile(r"^\s*<turn_aborted\b[^>]*>.*?(?:</turn_aborted>|$)\s*$", re.I | re.S)
+_CODEX_PREFIX_RECORDS = ("# Files mentioned by the user:", "# In app browser:")
 
 
-def _clean_codex_user(text: str) -> str:
-    for pat in _SYSTEM_BLOCK_RE:
-        text = pat.sub("", text)
-    text = _IMAGE_TAG_RE.sub("[图片]", text)
-    kept = []
-    for ln in text.splitlines():
-        s = ln.strip()
-        if not s:
-            continue
-        if s.startswith(_SYSTEM_LINE_PREFIX) or _ABORT_LINE.match(s):
-            continue
-        kept.append(ln)
-    text = "\n".join(kept).strip()
-    if text.startswith("Automation:"):
+def _clean_codex_user(text: str, events: Optional[list[str]] = None) -> str:
+    if _CODEX_ABORT_RE.match(text) or _is_known_codex_automation(text):
+        if events is not None:
+            events.append("内部内容已排除：Codex 中断或自动化注入")
         return ""
-    return text
+    while True:
+        before = text
+        text, agents_removed = _CODEX_AGENTS_RE.subn("", text)
+        if agents_removed and events is not None:
+            events.append("内部内容已排除：Codex AGENTS 包装")
+        for pat in _CODEX_ENVELOPE_RE:
+            text, removed = pat.subn("", text)
+            if removed and events is not None:
+                events.append("内部内容已排除：Codex 系统包装")
+        if text == before:
+            break
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if first in _CODEX_PREFIX_RECORDS:
+        if events is not None:
+            events.append("内部内容已排除：Codex 前置文件或浏览器上下文")
+        return ""
+    text = _IMAGE_TAG_RE.sub("[图片]", text)
+    return text.strip()
+
+
+def _is_known_codex_automation(text: str) -> bool:
+    if not text.lstrip().startswith("Automation:"):
+        return False
+    return bool(re.search(r"<(?:automation_id|current_time_iso)\b", text, re.I)
+                or re.match(r"^\s*Automation:\s*(?:Personal context|Daily observer|Weekly reflection)\b", text, re.I))
 
 
 def _codex_text(content) -> str:
@@ -437,7 +654,7 @@ def _codex_session_id(path: Path) -> str:
     return path.stem.removeprefix("rollout-") or path.stem
 
 
-def parse_codex(path: Path) -> Optional[list]:
+def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list]:
     cid = _codex_session_id(path)
     msgs: list = []
     try:
@@ -452,6 +669,8 @@ def parse_codex(path: Path) -> Optional[list]:
             try:
                 d = json.loads(line)
             except json.JSONDecodeError:
+                if events is not None:
+                    events.append(f"损坏 JSONL 行：Codex 第 {i} 行")
                 continue
             if d.get("type") != "response_item":
                 continue
@@ -463,10 +682,11 @@ def parse_codex(path: Path) -> Optional[list]:
                 continue
             text = _codex_text(payload.get("content"))
             if role == "user":
-                text = _clean_codex_user(text)
+                text = _clean_codex_user(text, events)
             if not text:
                 continue
-            mid = str(payload.get("id") or "") or _stable_id(role, None, text)
+            mid = (str(payload.get("id") or "")
+                   or _occurrence_id(role, d.get("timestamp"), i, text))
             msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
     if not msgs:
         return None
@@ -476,7 +696,60 @@ def parse_codex(path: Path) -> Optional[list]:
 
 # ---------- 解析器：本地 Claude Code ----------
 
-def parse_claude(path: Path) -> Optional[list]:
+_CLAUDE_INTERNAL_BLOCK = re.compile(
+    r"\s*<(command-name|command-message|command-args|local-command-caveat)\b[^>]*>.*?</\1>", re.I | re.S)
+_CLAUDE_TASK_NOTIFICATION = re.compile(r"^\s*<task-notification\b[^>]*>.*?</task-notification>\s*$", re.I | re.S)
+
+
+def _is_claude_internal_user_record(text: str) -> bool:
+    if _CLAUDE_TASK_NOTIFICATION.match(text):
+        return True
+    pos = 0
+    blocks = 0
+    while True:
+        match = _CLAUDE_INTERNAL_BLOCK.match(text, pos)
+        if not match:
+            break
+        blocks += 1
+        pos = match.end()
+    return bool(blocks and not text[pos:].strip())
+
+_CLAUDE_KNOWN_NON_MESSAGE_TYPES = {
+    "system", "mode", "permission-mode", "file-history-snapshot", "ai-title",
+    "last-prompt", "attachment", "queue-operation", "summary",
+}
+_CLAUDE_KNOWN_CONTENT_BLOCK_TYPES = {"tool_result", "tool_use", "thinking"}
+
+
+def _claude_content_text(content, events: Optional[list[str]]) -> tuple[str, bool]:
+    """Keep visible text blocks while accounting for known/unknown structured blocks."""
+    if isinstance(content, str):
+        return content.strip(), True
+    if not isinstance(content, list):
+        return "", content is None
+    parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            if events is not None:
+                events.append("未知内部记录告警：Claude 非对象内容块")
+            continue
+        block_type = str(block.get("type") or "")
+        if block_type == "text":
+            text = str(block.get("text") or "")
+            if text:
+                parts.append(text)
+        elif block_type == "image":
+            # Never stringify source/base64 fields from a local image block.
+            parts.append("[图片]")
+        elif block_type in _CLAUDE_KNOWN_CONTENT_BLOCK_TYPES:
+            if events is not None:
+                events.append(f"内部内容已排除：Claude {block_type} 内容块")
+        elif events is not None:
+            events.append(f"未知内部记录告警：Claude 内容块 type={block_type or '?'}")
+    return "\n".join(parts).strip(), True
+
+
+def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[list]:
     cid = path.stem
     msgs: list = []
     try:
@@ -491,26 +764,45 @@ def parse_claude(path: Path) -> Optional[list]:
             try:
                 d = json.loads(line)
             except json.JSONDecodeError:
+                if events is not None:
+                    events.append(f"损坏 JSONL 行：Claude 第 {i} 行")
+                continue
+            if d.get("isMeta") is True:
+                if events is not None:
+                    events.append("内部内容已排除：Claude isMeta")
+                continue
+            if d.get("isSidechain") is True:
+                if events is not None:
+                    events.append("内部内容已排除：Claude isSidechain")
                 continue
             if d.get("type") not in ("user", "assistant"):
+                if events is not None:
+                    if d.get("type") in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
+                        events.append("内部内容已排除：Claude 已知非消息记录")
+                    else:
+                        events.append(f"未知内部记录告警：Claude type={d.get('type') or '?'}")
                 continue
             m = d.get("message") or {}
             role = str(m.get("role") or d.get("type")).lower()
             if role not in ("user", "assistant"):
                 continue
             content = m.get("content")
-            if isinstance(content, str):
-                text = content.strip()
-            elif isinstance(content, list):
-                text = "\n".join(str(c.get("text", "")) for c in content
-                                  if isinstance(c, dict) and c.get("type") == "text").strip()
-            else:
-                text = ""
-            if role == "user" and re.match(r"^claude(?:\s+--?[\w-]+(?:\s+\S+)?)*\s*$", text):
-                continue  # CLI 调用/resume 行，不是真实内容
+            text, content_handled = _claude_content_text(content, events)
+            if role == "user":
+                if re.match(r"^claude(?:\s+--?[\w-]+(?:\s+\S+)?)*\s*$", text):
+                    if events is not None:
+                        events.append("内部内容已排除：Claude CLI/resume")
+                    continue  # CLI 调用/resume 行，不是真实内容
+                if _is_claude_internal_user_record(text):
+                    if events is not None:
+                        events.append("内部内容已排除：Claude 命令或任务通知")
+                    continue  # known whole-record internal notification
             if not text:
+                if content is not None and not content_handled and events is not None:
+                    events.append("未知内部记录告警：Claude 未识别消息内容")
                 continue
-            mid = str(d.get("uuid") or "") or _stable_id(role, None, text)
+            mid = (str(d.get("uuid") or "")
+                   or _occurrence_id(role, d.get("timestamp"), i, text))
             msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
     if not msgs:
         return None
@@ -532,6 +824,7 @@ def _atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
     except BaseException:
@@ -552,9 +845,12 @@ def load_imported(out_dir: Path) -> dict:
     p = imported_path(out_dir)
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            raise ImportError_(f"状态文件损坏，未修改：{p}（请先恢复或移走该文件）：{e}")
+        if not isinstance(data, dict):
+            raise ImportError_(f"状态文件结构损坏，未修改：{p}（期望 JSON 对象）")
+        return data
     return {}
 
 
@@ -566,46 +862,58 @@ def save_imported(imported: dict, out_dir: Path) -> None:
 
 def _format_message(role: str, t: Optional[str], mid: str, text: str) -> str:
     tstr = t or "（未知）"
-    return f"**{role}**（{tstr}；message_id: {mid}）：\n{text}"
+    return f"**{role}**（{tstr}；message_id: {mid}）：\n{_normalize_message_text(text)}"
+
+
+def _render_messages(msgs: list) -> str:
+    return "\n\n".join(_format_message(*m) for m in msgs)
+
+
+def _managed_parts(content: str, path: Path) -> tuple[str, str, str]:
+    begin = "<!-- distill-messages:begin -->"
+    end = "<!-- distill-messages:end -->"
+    if content.count(begin) != 1 or content.count(end) != 1:
+        raise ImportError_(f"现有 Markdown 的消息标记损坏，拒绝覆盖：{path}")
+    before, rest = content.split(begin, 1)
+    body, after = rest.split(end, 1)
+    return before, body.strip("\n"), after
+
+
+def _state_entry(path: Path, title: str, msgs: list) -> dict:
+    return {
+        "path": str(path), "imported_at": today_str(), "title": title,
+        "message_ids": [m[2] for m in msgs],
+    }
 
 
 def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool = False) -> str:
-    """写入会话；返回 'ok' / 'dup' / 'dry'。增量：已导入的 message_id 不再重复写，只追加新消息。"""
+    """Markdown is the source of truth; state is reconstructed from its final block."""
     source, cid, title, exported_at, msgs = conv
     key = f"{source}:{cid}"
-    prev = imported.get(key) or {}
-    known = set(prev.get("message_ids") or [])
-    new_msgs = [m for m in msgs if m[2] not in known]
-    if not new_msgs:
-        return "dup"
-    if dry_run:
-        return "dry"
-    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(out_dir, 0o700)
+    ids = [m[2] for m in msgs]
+    if len(ids) != len(set(ids)):
+        raise ImportError_(f"会话 {key} 出现重复 message_id，拒绝写入")
     path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
+    desired = _render_messages(msgs)
+    result = "new"
     if path.exists():
         existing = path.read_text(encoding="utf-8")
-        head, _sep, _tail = existing.partition("<!-- distill-messages:begin -->")
-        if _sep:
-            prefix = head
-            body = "\n".join(_format_message(*m) for m in msgs if m[2] in known)
-            # 追加新消息：新消息按时间排序接在后面
-            tail = "\n".join(_format_message(*m) for m in new_msgs)
-            content = prefix + "<!-- distill-messages:begin -->\n" + body
-            if tail:
-                content += ("\n" if body else "") + tail
-            content += "\n<!-- distill-messages:end -->"
-        else:
-            # 旧格式文件（无标记）：直接整体重写为完整消息
-            content = _build_content(source, cid, title, exported_at, msgs)
+        before, existing_body, after = _managed_parts(existing, path)
+        if existing_body == desired:
+            if not dry_run:
+                imported[key] = _state_entry(path, title, msgs)
+            return "dup"
+        result = "update"
+        content = before + "<!-- distill-messages:begin -->\n" + desired + "\n<!-- distill-messages:end -->" + after
     else:
         content = _build_content(source, cid, title, exported_at, msgs)
+    if dry_run:
+        return result
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(out_dir, 0o700)
     _atomic_write(path, content)
-    imported[key] = {
-        "path": str(path), "imported_at": today_str(), "title": title,
-        "message_ids": sorted(known | {m[2] for m in new_msgs}),
-    }
-    return "ok"
+    imported[key] = _state_entry(path, title, msgs)
+    return result
 
 
 def _build_content(source: str, cid: str, title: str, exported_at: str, msgs: list) -> str:
@@ -614,9 +922,8 @@ def _build_content(source: str, cid: str, title: str, exported_at: str, msgs: li
              f"<!-- conversation_id: {cid} -->",
              f"<!-- exported_at: {exported_at} -->",
              "", "<!-- distill-messages:begin -->"]
-    for role, t, mid, text in msgs:
-        lines.append(_format_message(role, t, mid, text))
-        lines.append("")
+    if msgs:
+        lines.append(_render_messages(msgs))
     lines.append("<!-- distill-messages:end -->")
     return "\n".join(lines)
 
@@ -723,10 +1030,10 @@ def run_source(source: str, path_arg: Optional[str], args, imported: dict,
     else:  # local
         since = args.since
         excludes = tuple(args.exclude or [])
-        roots = LOCAL_ROOTS
         if args.path:
-            roots = (("codex", args.path, "rollout-*.jsonl"),
-                     ("claude", args.path, "*.jsonl"))
+            found, discovery_failures = discover_local_path(Path(args.path), since, excludes, args.local_format)
+            return run_local(found, args, imported, out_dir, discovery_failures)
+        roots = LOCAL_ROOTS
         found = discover_local(since, excludes, roots)
         return run_local(found, args, imported, out_dir)
     return import_convs(convs, skipped, total, imported, out_dir, dry_run=args.dry_run)
@@ -734,79 +1041,150 @@ def run_source(source: str, path_arg: Optional[str], args, imported: dict,
 
 def import_convs(convs: list, skipped: list, total: int, imported: dict,
                  out_dir: Path, dry_run: bool) -> tuple:
-    ok = dup = 0
+    new = updated = dup = 0
     for conv in convs:
         try:
             result = write_conversation(conv, imported, out_dir, dry_run)
-        except OSError as e:
+        except (OSError, UnicodeDecodeError, ImportError_) as e:
             skipped.append((conv[1], f"写入失败：{e}"))
             continue
         if result == "dup":
             dup += 1
+        elif result == "update":
+            updated += 1
         else:
-            ok += 1
-    if not dry_run:
+            new += 1
+    if not dry_run and (new or updated or dup):
         save_imported(imported, out_dir)
-    return (total, ok, dup, skipped)
+    return (total, len(convs), new, updated, dup, skipped)
 
 
-def run_local(found: list, args, imported: dict, out_dir: Path) -> tuple:
+def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failures: Optional[list] = None) -> tuple:
+    discovery_failures = discovery_failures or []
     if not found:
         print("未发现可导入的本地会话（codex/claude）。")
-        return (0, 0, 0, [])
+        return (0, 0, 0, 0, 0, discovery_failures)
     total_size = sum(f[5] for f in found)
     print(f"发现 {len(found)} 个本地会话，总大小 {total_size / 1024:.0f} KB：")
     for source, sid, title, first_t, last_t, size, path in found:
         print(f"  [{source}] {title or sid}  {first_t or '?'} ~ {last_t or '?'}  {size}B  {path}")
     if args.dry_run:
-        print("（--dry-run：仅列出清单，未写入任何文件）")
-        return (len(found), 0, 0, [])
-    if not args.yes:
+        print("（--dry-run：完整解析和对账，未写入任何文件）")
+    if not args.dry_run and not args.yes:
         try:
             ans = input(f"\n确认导入以上 {len(found)} 个会话？[y/N] ").strip().lower()
         except EOFError:
             ans = "n"
         if ans not in ("y", "yes"):
             print("已取消。")
-            return (len(found), 0, 0, [])
-    ok = dup = 0
-    bad = []
+            return (len(found), 0, 0, 0, 0, discovery_failures)
+    new = updated = dup = 0
+    bad = list(discovery_failures)
     for source, sid, title, first_t, last_t, size, path in found:
+        events: list[str] = []
         try:
-            convs = parse_codex(Path(path)) if source == "codex" else parse_claude(Path(path))
+            convs = (parse_codex(Path(path), events) if source == "codex"
+                     else parse_claude(Path(path), events))
         except ImportError_ as e:
             bad.append((sid, str(e)))
             continue
+        bad.extend((sid, reason) for reason in events)
         if not convs:
-            bad.append((sid, SKIP_EMPTY))
+            if not events:
+                bad.append((sid, SKIP_EMPTY))
             continue
-        result = write_conversation(convs[0], imported, out_dir)
+        try:
+            result = write_conversation(convs[0], imported, out_dir, args.dry_run)
+        except (OSError, UnicodeDecodeError, ImportError_) as e:
+            bad.append((sid, f"写入失败：{e}"))
+            continue
         if result == "dup":
             dup += 1
+        elif result == "update":
+            updated += 1
         else:
-            ok += 1
-    save_imported(imported, out_dir)
-    return (len(found), ok, dup, bad)
+            new += 1
+    if not args.dry_run and (new or updated or dup):
+        save_imported(imported, out_dir)
+    return (len(found), new + updated + dup, new, updated, dup, bad)
 
 
-def print_report(total: int, ok: int, dup: int, skipped: list, source: str,
+def _is_expected_exclusion(reason: str) -> bool:
+    return reason.startswith("内部内容已排除") or reason.startswith("工具片段")
+
+
+def _expected_exclusion_count(expected: list[tuple[str, str]]) -> int:
+    count = 0
+    for _ref, reason in expected:
+        match = re.match(r"工具片段\s+(\d+)\s+条", reason)
+        count += int(match.group(1)) if match else 1
+    return count
+
+
+def print_report(total: int, outputs: int, new: int, updated: int, dup: int, skipped: list, source: str,
                  dry_run: bool) -> None:
+    expected = [(ref, reason) for ref, reason in skipped if _is_expected_exclusion(reason)]
+    failures = [(ref, reason) for ref, reason in skipped if not _is_expected_exclusion(reason)]
     if dry_run:
-        print(f"{source}：原始 {total} 个会话，dry-run 将导入 {ok}（未写入）")
+        print(f"{source}：原始 {total} 个会话，输出 {outputs} 个会话；dry-run 预计新导入 {new}、更新 {updated}、重复 {dup}（未写入）")
     else:
-        print(f"{source}：原始 {total} 个会话 → 导入 {ok}"
-              + (f"（其中已导入过 {dup}）" if dup else ""))
+        print(f"{source}：原始 {total} 个会话，输出 {outputs} 个会话 → 新导入 {new}、更新 {updated}、重复 {dup}"
+              + ("（已导入过）" if dup else ""))
+    if expected:
+        print(f"  预期内部内容排除 {_expected_exclusion_count(expected)} 个片段（不计为失败）")
     by_reason: dict[str, int] = {}
-    for _ref, reason in skipped:
+    for _ref, reason in failures:
         by_reason[reason] = by_reason.get(reason, 0) + 1
     if by_reason:
         detail = "；".join(reason + (f" ×{n}" if n > 1 else "") for reason, n in sorted(by_reason.items()))
-        print(f"  跳过 {len(skipped)}：{detail}")
-        for ref, reason in skipped[:15]:
+        print(f"  解析/写入失败 {len(failures)}：{detail}")
+        for ref, reason in failures[:15]:
             print(f"    - {ref}: {reason}")
-        if len(skipped) > 15:
-            print(f"    … 及另外 {len(skipped) - 15} 条")
-    print("完成。写入目录见各文件（本地处理，不上传）。")
+        if len(failures) > 15:
+            print(f"    … 及另外 {len(failures) - 15} 条")
+    if not failures:
+        print("完成。写入目录见各文件（本地处理，不上传）。")
+
+
+def _classify_local_file(path: Path, forced: str) -> str:
+    if forced != "auto":
+        return forced
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if record.get("type") == "session_meta" or "payload" in record:
+                    return "codex"
+                if record.get("type") in ("user", "assistant", "mode") or "message" in record:
+                    return "claude"
+                break
+    except (OSError, json.JSONDecodeError) as e:
+        raise ImportError_(f"无法识别本地 JSONL：{e}")
+    raise ImportError_("无法自动识别本地 JSONL；请使用 --local-format codex 或 claude")
+
+
+def discover_local_path(root: Path, since: Optional[str], excludes: tuple, forced: str) -> tuple[list, list]:
+    found, failures = [], []
+    candidates = [root] if root.is_file() else sorted(root.rglob("*.jsonl"))
+    for path in candidates:
+        if path.suffix != ".jsonl":
+            continue
+        rel = path.name if root.is_file() else str(path.relative_to(root))
+        if any(fnmatch.fnmatch(rel, ex) for ex in excludes):
+            continue
+        try:
+            source = _classify_local_file(path, forced)
+            size = path.stat().st_size
+            first_t, last_t, title = _peek(source, path)
+        except (ImportError_, OSError) as e:
+            failures.append((path.name, str(e)))
+            continue
+        if since and (last_t or first_t or "") < since:
+            continue
+        found.append((source, _session_id(source, path), title, first_t, last_t, size, str(path)))
+    return found, failures
 
 
 def main() -> int:
@@ -815,6 +1193,8 @@ def main() -> int:
     ap.add_argument("--path", help="导出来源目录/文件；local 可覆盖扫描根")
     ap.add_argument("--since", help="仅导入该日期（YYYY-MM-DD）之后的本地会话")
     ap.add_argument("--exclude", action="append", help="本地发现排除 glob（可重复）")
+    ap.add_argument("--local-format", choices=("auto", "codex", "claude"), default="auto",
+                    help="local --path 的 JSONL 格式；默认按结构自动识别")
     ap.add_argument("--dry-run", action="store_true", help="只列清单/识别，不写文件")
     ap.add_argument("--yes", action="store_true", help="跳过确认直接导入")
     ap.add_argument("--include-thinking", action="store_true",
@@ -826,21 +1206,25 @@ def main() -> int:
     _INCLUDE_THINKING = args.include_thinking
 
     out_dir = Path(args.root).expanduser() if args.root else INPUT_DIR
-    imported = load_imported(out_dir) if not args.dry_run else {}
-
     try:
+        # Even dry-run consults the Markdown truth and must not hide a corrupt state file.
+        imported = load_imported(out_dir)
         if args.source == "local" and not args.path:
             path_arg = None
         else:
             if not args.path:
                 ap.error(f"--source {args.source} 需要 --path")
             path_arg = args.path
-        total, ok, dup, skipped = run_source(args.source, path_arg, args, imported, out_dir)
-    except ImportError_ as e:
+        total, outputs, new, updated, dup, skipped = run_source(args.source, path_arg, args, imported, out_dir)
+    except (ImportError_, OSError) as e:
         print(f"错误：{e}", file=sys.stderr)
         return 1
 
-    print_report(total, ok, dup, skipped, args.source, args.dry_run)
+    print_report(total, outputs, new, updated, dup, skipped, args.source, args.dry_run)
+    failures = sum(1 for _ref, reason in skipped if not _is_expected_exclusion(reason))
+    successes = new + updated + dup
+    if failures:
+        return 2 if successes else 1
     return 0
 
 
