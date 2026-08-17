@@ -6,6 +6,7 @@
     python3 build.py --include-private   # 额外包含 03-l3-private.md
 """
 import html
+import json
 import re
 import shutil
 import sys
@@ -325,6 +326,7 @@ VIZ_MENU = """
   </button>
   <div class="viz-menu-dropdown" id="vizMenuDropdown">
     <button onclick="cycleTheme()"><span id="themeIcon">🌙</span><span id="themeLabel">Dark</span></button>
+    <button onclick="cycleLang()"><span>🌐</span><span id="langLabel">EN</span></button>
     <button onclick="window.print()"><span>🖨️</span><span>Print / PDF</span></button>
   </div>
 </div>
@@ -343,12 +345,210 @@ def hide_simulated_markers(markup: str) -> str:
     return markup.replace('[SIMULATED]', '<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>')
 
 
-def page(title: str, body: str, css: str, js: str) -> str:
+def page(title: str, body: str, css: str, js: str, i18n_data: dict | None = None) -> str:
     body = hide_simulated_markers(body)
     return (f'<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="UTF-8">\n'
             f'<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
             f'<title>{html.escape(title)}</title>\n<style>{css}\n{SIMULATED_CSS}</style>\n</head>\n'
-            f'<body>\n{body}\n<script>{js}</script>\n</body>\n</html>\n')
+            f'<body>\n{body}\n<script>{i18n_script(i18n_data)}</script>\n<script>{js}</script>\n</body>\n</html>\n')
+
+
+# ---------- i18n（Demo 中 / EN 切换） ----------
+# 界面文案走 data-i18n / data-i18n-html 属性，由页面底部 JS 字典切换；
+# {var} 占位符由 I18N_DATA（构建期数字）填充。样例正文内容保持中文（那是数据，不是界面）。
+
+I18N: dict[str, dict[str, str]] = {
+    "page.title": {"zh": "selfdistill · 蒸馏我", "en": "selfdistill · Distill Yourself"},
+    "brand.eyebrow": {"zh": "selfdistill · 蒸馏我", "en": "selfdistill · Distill Yourself"},
+    "hero.h1": {"zh": "selfdistill · 蒸馏我<br>4 层蒸馏架构可视化",
+                "en": "selfdistill · Distill Yourself<br>4-layer Distillation Architecture"},
+    "hero.sub": {"zh": "把和 AI 的聊天记录，蒸馏成看得见、带来源、AI 也用得上的个人档案。<br>"
+                       "L1 管行为 · L2 管判断 · L3 管事实 · L4 管方法 — 每一条都有来源，每一条都要经你确认。",
+                 "en": "Distill your AI chat history into a visible, sourced, AI-usable personal profile.<br>"
+                       "L1 behavior · L2 judgment · L3 facts · L4 methods — every item has a source, every item is confirmed by you."},
+    "hero.simulated": {"zh": "以下内容为虚构示例，不代表真实个人身份。",
+                       "en": "All content below is fictional sample data; it does not represent a real person."},
+    "hero.meta.canonical": {"zh": "📁 档案目录：<code>canonical/</code>",
+                            "en": "📁 Profile dir: <code>canonical/</code>"},
+    "hero.meta.writeback": {"zh": "🔗 写回：Codex / Hermes / DSH",
+                            "en": "🔗 Write-back: Codex / Hermes / DSH"},
+    "hero.meta.l3": {"zh": "🔒 L3 含敏感块，默认不加载",
+                     "en": "🔒 L3 has private blocks, not loaded by default"},
+    "kpi.layers.label": {"zh": "核心层", "en": "Core layers"},
+    "kpi.layers.hint": {"zh": "行为 / 判断 / 事实 / 方法", "en": "Behavior / Judgment / Facts / Methods"},
+    "kpi.bytes.label": {"zh": "canonical 总字节", "en": "canonical bytes"},
+    "kpi.bytes.hint": {"zh": "含 {domains} 个领域手册", "en": "{domains} domain playbooks"},
+    "kpi.domains.label": {"zh": "领域手册", "en": "Domain playbooks"},
+    "kpi.domains.hint": {"zh": "按任务加载，不全量常驻", "en": "Loaded per task, not always resident"},
+    "kpi.targets.label": {"zh": "写回目标", "en": "Write-back targets"},
+    "kpi.targets.hint": {"zh": "Codex / Hermes / DSH", "en": "Codex / Hermes / DSH"},
+    "files.head": {"zh": "4 个核心文件", "en": "4 core files"},
+    "files.hint": {"zh": "职责分离 · 互不重叠 · 冲突时按优先级裁决",
+                   "en": "Separate concerns · non-overlapping · conflicts resolved by priority"},
+    "files.stats": {"zh": "canonical 字节", "en": "canonical bytes"},
+    "files.link.visual": {"zh": "📊 可视化版", "en": "📊 Visualized"},
+    "files.link.raw": {"zh": "📄 原始报告", "en": "📄 Raw report"},
+    "arch.head": {"zh": "分层架构 — 职责清晰，互不重叠",
+                  "en": "Layered architecture — clear, non-overlapping responsibilities"},
+    "arch.priority": {"zh": "💡 冲突时按优先级裁决：平台安全 &gt; 用户当前指令 &gt; 任务上下文 &gt; L1 &gt; L2 &gt; L3 — "
+                            "<strong>用户当前明确要求永远高于历史画像</strong>。",
+                      "en": "💡 Conflicts resolve by priority: platform safety &gt; current user instruction &gt; task context "
+                            "&gt; L1 &gt; L2 &gt; L3 — <strong>the user's current explicit request always outranks the historical profile</strong>."},
+    "ratio.head": {"zh": "canonical 内容分布 ≈ {l1} : {l2} : {l3} : {l4}",
+                   "en": "canonical content distribution ≈ {l1} : {l2} : {l3} : {l4}"},
+    "ratio.hint": {"zh": "越往下越重 · 按需加载", "en": "Heavier downward · loaded on demand"},
+    "ratio.legend.l1": {"zh": "L1 最薄 — 行为规则必须精炼，常驻不耗 token",
+                        "en": "L1 thinnest — behavior rules stay lean, always-on without token bloat"},
+    "ratio.legend.l2": {"zh": "L2 中等 — 判断逻辑要覆盖但不啰嗦",
+                        "en": "L2 medium — judgment logic covers but stays concise"},
+    "ratio.legend.l3": {"zh": "L3 分块 — 按领域切分，只加载需要的块",
+                        "en": "L3 chunked — split by domain, load only what's needed"},
+    "ratio.legend.l4": {"zh": "L4 最重 — 领域深度只在对应任务加载",
+                        "en": "L4 heaviest — domain depth loads only for matching tasks"},
+    "example.head": {"zh": "协同示例 — 一条反馈从进入到响应 <small>[SIMULATED] 虚构演示</small>",
+                     "en": "Collaboration example — a feedback from input to response <small>[SIMULATED] demo</small>"},
+    "example.hint": {"zh": "[SIMULATED] 用户说「这个方案我看不懂」",
+                     "en": "[SIMULATED] User says: \"I don't understand this proposal\""},
+    "example.quote": {"zh": "[SIMULATED] 每个步骤都有明确的文件来源，没有「AI 自己看着办」的模糊地带。",
+                      "en": "[SIMULATED] Every step has an explicit file source — no \"the AI just figures it out\" gray zone."},
+    "example.th.step": {"zh": "步骤", "en": "Step"},
+    "example.th.file": {"zh": "文件", "en": "File"},
+    "example.th.decision": {"zh": "决策", "en": "Decision"},
+    "prin.head": {"zh": "核心设计原则", "en": "Core design principles"},
+    "prin.th.principle": {"zh": "原则", "en": "Principle"},
+    "prin.th.how": {"zh": "体现", "en": "How it shows"},
+    "prin.th.source": {"zh": "出处", "en": "Source"},
+    "maintain.head": {"zh": "维护闭环 — 蒸馏不是一次性的",
+                      "en": "Maintenance loop — distillation isn't one-off"},
+    "maintain.hint": {"zh": "手动更新 · 用户把关", "en": "Manual updates · user-gated"},
+    "maintain.1.label": {"zh": "追加", "en": "Append"},
+    "maintain.1.hint": {"zh": "新对话整理成统一 Markdown，放进 input/",
+                        "en": "New chats normalized into unified Markdown, into input/"},
+    "maintain.2.label": {"zh": "蒸馏", "en": "Distill"},
+    "maintain.2.hint": {"zh": "重跑 prompts/distill.md 的蒸馏 prompt",
+                        "en": "Re-run the prompts/distill.md distillation prompt"},
+    "maintain.3.label": {"zh": "确认", "en": "Confirm"},
+    "maintain.3.hint": {"zh": "diff 逐条确认后进 canonical", "en": "Approve each diff line, then into canonical"},
+    "maintain.4.label": {"zh": "构建", "en": "Build"},
+    "maintain.4.hint": {"zh": "python3 build.py + install.py 写回 AI 工具",
+                        "en": "python3 build.py + install.py write back to AI tools"},
+    "footer.1": {"zh": "canonical/ · selfdistill 蒸馏我 — 让 AI 按使用者的思维方式配合",
+                 "en": "canonical/ · selfdistill — make AI work the way you think"},
+    "footer.template": {"zh": "canonical/ · selfdistill 蒸馏我 — 脱敏后的本地蒸馏示例",
+                        "en": "canonical/ · selfdistill — de-identified local distillation sample"},
+    "footer.2": {"zh": "L3 画像含 <code>[SENSITIVE]</code> 健康 / 财务 / 家庭细节，本页只展示结构与标签，不展示敏感原文；本页为示例数据",
+                 "en": "L3 profile contains <code>[SENSITIVE]</code> health / finance / family details; this page shows structure "
+                       "and labels only, never the sensitive text; sample data"},
+    "nav.home": {"zh": "← 主目录", "en": "← Home"},
+    "nav.raw": {"zh": "📄 原始版", "en": "📄 Raw"},
+    "raw.back": {"zh": "← 返回主页", "en": "← Back to home"},
+    "raw.suffix": {"zh": " · 原始报告", "en": " · Raw report"},
+    "eyebrow.file": {"zh": "selfdistill · 蒸馏我 · 第 {n}/4 文件", "en": "selfdistill · Distill Yourself · File {n}/4"},
+}
+
+
+def i18n_script(i18n_data: dict | None = None) -> str:
+    """生成页面底部的中/EN 切换脚本（字典 + 数据 + applyLang/cycleLang）。"""
+    data_json = json.dumps(i18n_data or {}, ensure_ascii=False)
+    # JS 侧按语言索引：I18N[lang][key]
+    by_lang: dict[str, dict[str, str]] = {"zh": {}, "en": {}}
+    for _key, _pair in I18N.items():
+        by_lang["zh"][_key] = _pair["zh"]
+        by_lang["en"][_key] = _pair["en"]
+    dict_json = json.dumps(by_lang, ensure_ascii=False)
+    return (
+        "window.I18N=" + dict_json + ";"
+        "window.I18N_DATA=" + data_json + ";"
+        "var savedLang=null;try{savedLang=localStorage.getItem('viz-lang')}catch(e){}"
+        "var currentLang=savedLang||((navigator.language||'').toLowerCase().indexOf('zh')===0?'zh':'en');"
+        "function i18nFill(s){return s.replace(/\{(\w+)\}/g,function(m,v){return (window.I18N_DATA&&window.I18N_DATA[v]!==undefined)?window.I18N_DATA[v]:m})}"
+        "function applyLang(lang){"
+        "var dict=window.I18N[lang]||window.I18N.zh;currentLang=lang;"
+        "document.documentElement.lang=(lang==='zh'?'zh-CN':'en');"
+        "var a=document.querySelectorAll('[data-i18n]');for(var i=0;i<a.length;i++){var k=a[i].getAttribute('data-i18n');if(dict[k]!==undefined)a[i].textContent=i18nFill(dict[k])}"
+        "var b=document.querySelectorAll('[data-i18n-html]');for(var j=0;j<b.length;j++){var k2=b[j].getAttribute('data-i18n-html');if(dict[k2]!==undefined)b[j].innerHTML=i18nFill(dict[k2])}"
+        "var t=document.querySelector('title');if(t&&dict['page.title']!==undefined)t.textContent=dict['page.title'];"
+        "var lb=document.getElementById('langLabel');if(lb)lb.textContent=(lang==='zh'?'EN':'中文');"
+        "try{localStorage.setItem('viz-lang',lang)}catch(e){}"
+        "}"
+        "function cycleLang(){applyLang(currentLang==='zh'?'en':'zh')}"
+        "applyLang(currentLang);"
+    )
+
+
+def inject_i18n_template(markup: str, i18n_data: dict | None = None) -> str:
+    """给静态模板（l1-l4.html）注入语言切换按钮与 i18n 脚本；模板文案自带 data-i18n 属性。"""
+    button = '<button onclick="cycleLang()"><span>🌐</span><span id="langLabel">EN</span></button>'
+    if '<button onclick="window.print()">' in markup:
+        markup = markup.replace('<button onclick="window.print()">',
+                                '<button onclick="window.print()">' + button, 1)
+    if "</body>" in markup:
+        markup = markup.replace("</body>", f"<script>{i18n_script(i18n_data)}</script></body>", 1)
+    return markup
+
+
+# ---- 按 LAYERS/示例/原则 数据生成 i18n 键（zh 来自现有中文，en 为翻译） ----
+
+LAYER_EN = {
+    "l1": {
+        "tag": "🛡️ Contract", "name": "L1 · Collaboration Contract",
+        "role": "How to work — boundaries + feedback + reporting + priorities",
+        "desc": "The user's core asset. Defines <strong>how to work together</strong>: lead with conclusions, plain language, "
+                "verify dynamic facts first, own mistakes, transparent change reports.<br><br>"
+                "<b>Key design:</b> three authorization tiers (analyze-only → don't touch / implement → go ahead / external → confirm first), "
+                "strong vs weak feedback signals, 6-level priority resolution; L3 can never issue behavior commands.",
+        "chips": ["Identity", "Authorization", "Feedback", "Reporting", "Priorities 1-6"],
+    },
+    "l2": {
+        "tag": "🧭 Decision Logic", "name": "L2 · Decision Logic",
+        "role": "How to decide — trade-offs + priorities + red lines + stability flags",
+        "desc": "[SIMULATED] Describes <strong>how a fictional sample user thinks when facing a decision</strong>, so AI can "
+                "advise and write with that mindset.<br><br>"
+                "<b>Key design:</b> core modules (product judgment / AI scenarios / problem framing / project governance) load "
+                "with judgment-heavy tasks; domain modules (design portfolio / copywriting / photo &amp; travel) load only for "
+                "matching tasks; every principle carries a stability flag, temporary entries re-enter review automatically.",
+        "chips": ["Product &amp; needs", "AI scenarios", "Problem framing", "Project governance", "Design portfolio", "Copywriting", "Photo &amp; travel"],
+    },
+    "l3": {
+        "tag": "👤 User Profile", "name": "L3 · User Profile",
+        "role": "Who the user is — domain chunks + sensitivity tiers",
+        "desc": "Treats the user as a specific person: design career, family, health, travel, interests, content experiments, "
+                "AI usage background.<br><br>"
+                "<b>Key design:</b> chunked by domain, load only the chunks the current task needs; real sensitive chunks are "
+                "not loaded by default; demo data carries <code>as_of</code> and <code>simulated</code> states.",
+        "chips": ["Basics", "Design portfolio", "Working skills", "Family 🔒", "Health &amp; finance 🔒", "Travel", "Interests", "Content experiments", "AI background"],
+    },
+    "l4": {
+        "tag": "📚 Domain Playbooks", "name": "L4 · Domain Playbooks",
+        "role": "By task type — deep domain playbooks",
+        "desc": "A third loading level above L1/L2/L3: how to do specific domains. Several playbooks are already distilled "
+                "and keep growing with the project.<br><br>"
+                "<b>Key design:</b> each playbook binds to a skill/domain and loads only when a task enters that domain — "
+                "no dilution of the always-on context.",
+        "chips": [],  # __DOMAINS__：en 沿用中文领域名（专有名词），见 build_home
+    },
+}
+
+EXAMPLE_EN = {
+    0: ("[SIMULATED] ① Capture correction signals", "[SIMULATED] L1 · Contract", "[SIMULATED] \"I don't get it\" is a correction signal → adjust immediately"),
+    1: ("[SIMULATED] ② Adapt expression", "[SIMULATED] L1 · Contract", "[SIMULATED] Translate technical content into business language: what / why / impact"),
+    2: ("[SIMULATED] ③ Judgment path", "[SIMULATED] L2 · Decision Logic", "[SIMULATED] Think it through first — confusion may mean the plan itself is unclear"),
+    3: ("[SIMULATED] ④ Recall background", "[SIMULATED] L3 · Profile", "[SIMULATED] Load only relevant chunks, never touch sensitive info"),
+    4: ("[SIMULATED] ⑤ Reporting style", "[SIMULATED] L1 · Contract", "[SIMULATED] Lead with conclusions, plain language, before/after change notes"),
+    5: ("[SIMULATED] ⑥ Closing the loop", "[SIMULATED] Distillation flow", "[SIMULATED] New preferences → confirmed, then into canonical; never auto-edited"),
+}
+
+PRINCIPLES_EN = [
+    ("[SIMULATED] Layered architecture", "[SIMULATED] L1 behavior / L2 judgment / L3 facts / L4 domains, non-overlapping", "[SIMULATED] canonical/"),
+    ("[SIMULATED] L3 never commands", "[SIMULATED] Profile provides facts and defaults only, never behavior commands", "[SIMULATED] L1 · Priority"),
+    ("[SIMULATED] User instruction wins", "[SIMULATED] Current explicit request &gt; historical profile; profile never locks the user in", "[SIMULATED] L1 · Hard rule"),
+    ("[SIMULATED] Verify dynamic facts first", "[SIMULATED] Price / time / distance / availability: query first, never guess", "[SIMULATED] L1 · How to work"),
+    ("[SIMULATED] Corrections are raw material", "[SIMULATED] Adjust on the spot and record candidates; no after-the-fact recall", "[SIMULATED] L1 · Capture corrections"),
+    ("[SIMULATED] Weak signals not collected", "[SIMULATED] Shorter replies / topic changes: not recorded, not attributed — can't tell dissatisfaction from busyness", "[SIMULATED] L1 · Feedback"),
+    ("[SIMULATED] Chunked loading", "[SIMULATED] L3 by domain, L4 by task — never load whole documents into context", "[SIMULATED] Loading rules"),
+    ("[SIMULATED] Credibility markers", "[SIMULATED] Every item carries as_of timestamp + confirmed / pending", "[SIMULATED] Metadata"),
+    ("[SIMULATED] Write only after confirmation", "[SIMULATED] Candidates enter canonical only after confirmation, never auto-edited", "[SIMULATED] Distillation flow"),
+]
 
 
 # ---------- 主页 ----------
@@ -387,6 +587,53 @@ LAYERS = [
 # showcase CSS 用 fc-pb/layer-pb/seg-pb 表示 L4（playbooks 橙色），映射 class
 CSS_CLS = {"l1": "l1", "l2": "l2", "l3": "l3", "l4": "pb"}
 
+# 协同示例行（zh 为默认文案，en 见 EXAMPLE_EN；键 example.r{i}.{col}）
+EXAMPLE_ROWS = [
+    ("[SIMULATED] ① 捕捉修正信号", "[SIMULATED] L1 · 协作契约", "[SIMULATED] 「看不懂」是修正信号 → 当场照做调整"),
+    ("[SIMULATED] ② 表达适配", "[SIMULATED] L1 · 协作契约", "[SIMULATED] 技术内容翻译成业务语言：这是什么 / 为什么 / 影响什么"),
+    ("[SIMULATED] ③ 判断路径", "[SIMULATED] L2 · 决策逻辑", "[SIMULATED] 先想明白再动手 — 没听懂可能是方案本身没想清楚"),
+    ("[SIMULATED] ④ 背景召回", "[SIMULATED] L3 · 用户画像", "[SIMULATED] 只加载相关块，不碰敏感信息"),
+    ("[SIMULATED] ⑤ 汇报方式", "[SIMULATED] L1 · 协作契约", "[SIMULATED] 结论先行、说人话、改动说明 before/after"),
+    ("[SIMULATED] ⑥ 沉淀闭环", "[SIMULATED] 蒸馏流程", "[SIMULATED] 新偏好 → 确认后进 canonical，不自动改"),
+]
+
+# 核心设计原则行（zh 默认，en 见 PRINCIPLES_EN；键 prin.row.{i}.{col}）
+PRINCIPLES = [
+    ("[SIMULATED] 分层架构", "[SIMULATED] L1 行为 / L2 判断 / L3 事实 / L4 领域，职责互不重叠", "[SIMULATED] canonical/"),
+    ("[SIMULATED] L3 不发命令", "[SIMULATED] 用户画像只提供事实和默认偏好，不能发出行为命令", "[SIMULATED] L1 · 优先级"),
+    ("[SIMULATED] 用户指令最高", "[SIMULATED] 当前明确要求 &gt; 历史画像；画像不锁定用户", "[SIMULATED] L1 · 硬规则"),
+    ("[SIMULATED] 动态事实先查询", "[SIMULATED] 价格 / 时间 / 距离 / 开放状态先真实查询，严禁脑补", "[SIMULATED] L1 · 怎么配合"),
+    ("[SIMULATED] 修正即素材", "[SIMULATED] 「看不懂 / 不对」当场调整并记录候选，不靠事后回忆", "[SIMULATED] L1 · 捕捉修正"),
+    ("[SIMULATED] 弱信号不采集", "[SIMULATED] 回复变短 / 换话题不记录不归因——无法区分不满与忙碌", "[SIMULATED] L1 · 反馈信号"),
+    ("[SIMULATED] 分块加载", "[SIMULATED] L3 按领域分块、L4 按任务加载，不整篇装入上下文", "[SIMULATED] 加载规则"),
+    ("[SIMULATED] 可信度标记", "[SIMULATED] 每条带 as_of 时间戳 + confirmed / 待确认", "[SIMULATED] 元数据"),
+    ("[SIMULATED] 确认后才写入", "[SIMULATED] 候选经确认后才进 canonical，不自动改", "[SIMULATED] 蒸馏流程"),
+]
+
+# 由数据生成 i18n 键（layer.* / example.r* / prin.r*）
+for _L in LAYERS:
+    _cls = _L["cls"]
+    _en = LAYER_EN[_cls]
+    I18N[f"layer.{_cls}.name"] = {"zh": _L["name"], "en": _en["name"]}
+    I18N[f"layer.{_cls}.tag"] = {"zh": _L["tag"], "en": _en["tag"]}
+    I18N[f"layer.{_cls}.role"] = {"zh": _L["role"], "en": _en["role"]}
+    I18N[f"layer.{_cls}.desc"] = {"zh": _L["desc"], "en": _en["desc"]}
+    if _L["chips"] != ["__DOMAINS__"]:
+        I18N[f"layer.{_cls}.chips"] = {
+            "zh": "".join(f"<i>{c}</i>" for c in _L["chips"]),
+            "en": "".join(f"<i>{c}</i>" for c in _en["chips"]),
+        }
+for _i, (_s, _f, _d) in enumerate(EXAMPLE_ROWS, start=1):
+    _en = EXAMPLE_EN[_i - 1]
+    I18N[f"example.r{_i}.1"] = {"zh": _s, "en": _en[0]}
+    I18N[f"example.r{_i}.2"] = {"zh": _f, "en": _en[1]}
+    I18N[f"example.r{_i}.3"] = {"zh": _d, "en": _en[2]}
+for _i, (_p, _e, _s) in enumerate(PRINCIPLES, start=1):
+    _en = PRINCIPLES_EN[_i - 1]
+    I18N[f"prin.r{_i}.1"] = {"zh": _p, "en": _en[0]}
+    I18N[f"prin.r{_i}.2"] = {"zh": _e, "en": _en[1]}
+    I18N[f"prin.r{_i}.3"] = {"zh": _s, "en": _en[2]}
+
 
 def build_home(domains: list, sizes: dict, assets: dict) -> str:
     total = sum(sizes.values()) or 1
@@ -394,156 +641,170 @@ def build_home(domains: list, sizes: dict, assets: dict) -> str:
     l2_pct = round(sizes["l2"] / total * 100)
     l3_pct = round(sizes["l3"] / total * 100)
     l4_pct = 100 - l1_pct - l2_pct - l3_pct
+    kb = round(total / 1024)
+    i18n_data = {"kb": kb, "domains": len(domains), "l1": l1_pct, "l2": l2_pct, "l3": l3_pct, "l4": l4_pct}
 
     hero = (
         '<header class="hero animate">'
-        '<span class="eyebrow">selfdistill · 蒸馏我</span>'
-        '<h1>selfdistill · 蒸馏我<br>4 层蒸馏架构可视化</h1>'
-        '<p class="sub">把和 AI 的聊天记录，蒸馏成看得见、带来源、AI 也用得上的个人档案。<br>'
+        '<span class="eyebrow" data-i18n="brand.eyebrow">selfdistill · 蒸馏我</span>'
+        '<h1 data-i18n-html="hero.h1">selfdistill · 蒸馏我<br>4 层蒸馏架构可视化</h1>'
+        '<p class="sub" data-i18n-html="hero.sub">把和 AI 的聊天记录，蒸馏成看得见、带来源、AI 也用得上的个人档案。<br>'
         'L1 管行为 · L2 管判断 · L3 管事实 · L4 管方法 — 每一条都有来源，每一条都要经你确认。</p>'
-        '<p class="simulated-banner">以下内容为虚构示例，不代表真实个人身份。</p>'
+        '<p class="simulated-banner" data-i18n="hero.simulated">以下内容为虚构示例，不代表真实个人身份。</p>'
         '<div class="hero-meta">'
-        '<span>📁 canonical：<code>canonical/</code></span>'
-        '<span>🔗 双载体：Hermes Skill + Codex Profile</span>'
-        '<span>🔒 L3 含敏感块，默认不加载</span>'
+        '<span data-i18n-html="hero.meta.canonical">📁 档案目录：<code>canonical/</code></span>'
+        '<span data-i18n="hero.meta.writeback">🔗 写回：Codex / Hermes / DSH</span>'
+        '<span data-i18n="hero.meta.l3">🔒 L3 含敏感块，默认不加载</span>'
         '</div></header>'
     )
 
-    kb = round(total / 1024)
     kpis = (
         '<section data-reveal class="reveal"><div class="kpis">'
-        f'<div class="kpi animate delay-1"><div class="num" data-count="4" data-suffix="">4</div><div class="label">核心层</div><div class="hint">行为 / 判断 / 事实 / 方法</div></div>'
-        f'<div class="kpi animate delay-2"><div class="num" data-count="{kb}" data-suffix="K">{kb}K</div><div class="label">canonical 总字节</div><div class="hint">含 {len(domains)} 个领域手册</div></div>'
-        f'<div class="kpi animate delay-3"><div class="num" data-count="{len(domains)}" data-suffix="">{len(domains)}</div><div class="label">领域手册</div><div class="hint">按任务加载，不全量常驻</div></div>'
-        f'<div class="kpi animate delay-4"><div class="num" data-count="2" data-suffix="">2</div><div class="label">部署载体</div><div class="hint">Hermes + Codex 同步</div></div>'
+        f'<div class="kpi animate delay-1"><div class="num" data-count="4">4</div>'
+        f'<div class="label" data-i18n="kpi.layers.label">核心层</div>'
+        f'<div class="hint" data-i18n="kpi.layers.hint">行为 / 判断 / 事实 / 方法</div></div>'
+        f'<div class="kpi animate delay-2"><div class="num" data-count="{kb}">{kb}K</div>'
+        f'<div class="label" data-i18n="kpi.bytes.label">canonical 总字节</div>'
+        f'<div class="hint" data-i18n="kpi.bytes.hint">含 {len(domains)} 个领域手册</div></div>'
+        f'<div class="kpi animate delay-3"><div class="num" data-count="{len(domains)}">{len(domains)}</div>'
+        f'<div class="label" data-i18n="kpi.domains.label">领域手册</div>'
+        f'<div class="hint" data-i18n="kpi.domains.hint">按任务加载，不全量常驻</div></div>'
+        f'<div class="kpi animate delay-4"><div class="num" data-count="3">3</div>'
+        f'<div class="label" data-i18n="kpi.targets.label">写回目标</div>'
+        f'<div class="hint" data-i18n="kpi.targets.hint">Codex / Hermes / DSH</div></div>'
         '</div></section>'
     )
 
     domain_cn = {"agent-work": "智能体协作", "product-work": "产品规划", "writing-style": "写作风格"}
     domain_names = [domain_cn.get(fid, fid) for fid, _t, _d in domains]
+    if LAYERS[3]["chips"] == ["__DOMAINS__"]:
+        I18N["layer.l4.chips"] = {
+            "zh": "".join(f"<i>{c}</i>" for c in domain_names),
+            "en": "".join(f"<i>{c}</i>" for c in domain_names),  # 领域名是内容，双语一致
+        }
     cards = []
     for i, L in enumerate(LAYERS):
+        cls = L["cls"]
         chips = domain_names if L["chips"] == ["__DOMAINS__"] else L["chips"]
         chip_html = "".join(f"<i>{c}</i>" for c in chips)
         size = sizes.get(L["cls"], 0)
         cards.append(
             f'<div class="file-card fc-{CSS_CLS[L["cls"]]} animate delay-{i + 1}">'
-            f'<span class="tag">{L["tag"]}</span>'
-            f'<h3>{L["name"]}</h3>'
-            f'<p class="role">{L["role"]}</p>'
-            f'<p class="desc">{L["desc"]}</p>'
-            f'<div class="chips">{chip_html}</div>'
-            f'<div class="stats"><span>canonical 字节</span><b>{fmt_size(size)}</b></div>'
+            f'<span class="tag" data-i18n="layer.{cls}.tag">{L["tag"]}</span>'
+            f'<h3 data-i18n="layer.{cls}.name">{L["name"]}</h3>'
+            f'<p class="role" data-i18n="layer.{cls}.role">{L["role"]}</p>'
+            f'<p class="desc" data-i18n-html="layer.{cls}.desc">{L["desc"]}</p>'
+            f'<div class="chips" data-i18n-html="layer.{cls}.chips">{chip_html}</div>'
+            f'<div class="stats"><span data-i18n="files.stats">canonical 字节</span><b>{fmt_size(size)}</b></div>'
             f'<div class="links">'
-            f'<a href="{L["cls"]}.html" class="primary">📊 可视化版</a>'
-            f'<a href="{L["cls"]}-raw.html">📄 原始报告</a>'
+            f'<a href="{L["cls"]}.html" class="primary" data-i18n="files.link.visual">📊 可视化版</a>'
+            f'<a href="{L["cls"]}-raw.html" data-i18n="files.link.raw">📄 原始报告</a>'
             f'</div></div>'
         )
     files = (
         '<section data-reveal class="reveal">'
-        '<div class="section-head"><span class="num">1</span><h2>4 个核心文件</h2>'
-        '<span class="hint">职责分离 · 互不重叠 · 冲突时按优先级裁决</span></div>'
+        '<div class="section-head"><span class="num">1</span><h2 data-i18n="files.head">4 个核心文件</h2>'
+        '<span class="hint" data-i18n="files.hint">职责分离 · 互不重叠 · 冲突时按优先级裁决</span></div>'
         f'<div class="file-grid">{"".join(cards)}</div></section>'
     )
 
     arch_layers = ""
     for L in LAYERS:
+        cls = L["cls"]
         arch_layers += (
             f'<div class="layer layer-{CSS_CLS[L["cls"]]}">'
-            f'<span class="name">{L["name"]}</span>'
-            f'<span class="role">{L["role"].split("—")[0].strip()}</span>'
-            f'<span class="question">{L["role"].split("—")[-1].strip()}</span>'
+            f'<span class="name" data-i18n="layer.{cls}.name">{L["name"]}</span>'
+            f'<span class="role" data-i18n="layer.{cls}.role.short">{L["role"].split("—")[0].strip()}</span>'
+            f'<span class="question" data-i18n="layer.{cls}.role.long">{L["role"].split("—")[-1].strip()}</span>'
             f'</div>'
         )
+    for L in LAYERS:
+        cls = L["cls"]
+        en_role = LAYER_EN[cls]["role"]
+        I18N[f"layer.{cls}.role.short"] = {"zh": L["role"].split("—")[0].strip(),
+                                           "en": en_role.split("—")[0].strip()}
+        I18N[f"layer.{cls}.role.long"] = {"zh": L["role"].split("—")[-1].strip(),
+                                          "en": en_role.split("—")[-1].strip()}
     arch = (
         '<section data-reveal class="reveal">'
-        '<div class="section-head"><span class="num">2</span><h2>分层架构 — 职责清晰，互不重叠</h2></div>'
+        '<div class="section-head"><span class="num">2</span><h2 data-i18n="arch.head">分层架构 — 职责清晰，互不重叠</h2></div>'
         f'<div class="arch animate">{arch_layers}</div>'
-        '<p style="color:var(--text-secondary);font-size:.9rem;text-align:center;margin-top:.5rem">'
-        '💡 冲突时按优先级裁决：平台安全 &gt; 用户当前指令 &gt; 任务上下文 &gt; L1 &gt; L2 &gt; L3 — <strong>用户当前明确要求永远高于历史画像</strong>。</p>'
+        '<p style="color:var(--text-secondary);font-size:.9rem;text-align:center;margin-top:.5rem" '
+        'data-i18n-html="arch.priority">'
+        '💡 冲突时按优先级裁决：平台安全 &gt; 用户当前指令 &gt; 任务上下文 &gt; L1 &gt; L2 &gt; L3 — '
+        '<strong>用户当前明确要求永远高于历史画像</strong>。</p>'
         '</section>'
     )
 
     ratio = (
         '<section data-reveal class="reveal">'
-        f'<div class="section-head"><span class="num">3</span><h2>canonical 内容分布 ≈ {l1_pct} : {l2_pct} : {l3_pct} : {l4_pct}</h2>'
-        '<span class="hint">越往下越重 · 按需加载</span></div>'
+        f'<div class="section-head"><span class="num">3</span><h2 data-i18n="ratio.head">canonical 内容分布 ≈ {l1_pct} : {l2_pct} : {l3_pct} : {l4_pct}</h2>'
+        '<span class="hint" data-i18n="ratio.hint">越往下越重 · 按需加载</span></div>'
         f'<div class="ratio-section card animate">'
-        f'<div class="ratio-bar" role="img" aria-label="canonical 内容分布 {l1_pct}:{l2_pct}:{l3_pct}:{l4_pct}">'
+        f'<div class="ratio-bar" role="img" aria-label="canonical {l1_pct}:{l2_pct}:{l3_pct}:{l4_pct}">'
         f'<div class="seg seg-l1" style="flex:{l1_pct}">L1 {l1_pct}%</div><div class="seg seg-l2" style="flex:{l2_pct}" title="{l2_pct}%">L2 {l2_pct}%</div>'
         f'<div class="seg seg-l3" style="flex:{l3_pct}" title="{l3_pct}%">L3 {l3_pct}%</div><div class="seg seg-pb" style="flex:{l4_pct}" title="{l4_pct}%">L4 {l4_pct}%</div>'
         '</div>'
         '<div class="ratio-legend">'
-        '<span><i style="background:#3b82f6"></i>L1 最薄 — 行为规则必须精炼，常驻不耗 token</span>'
-        '<span><i style="background:#8b5cf6"></i>L2 中等 — 判断逻辑要覆盖但不啰嗦</span>'
-        '<span><i style="background:#10b981"></i>L3 分块 — 按领域切分，只加载需要的块</span>'
-        '<span><i style="background:#f59e0b"></i>L4 最重 — 领域深度只在对应任务加载</span>'
+        '<span data-i18n="ratio.legend.l1"><i style="background:#3b82f6"></i>L1 最薄 — 行为规则必须精炼，常驻不耗 token</span>'
+        '<span data-i18n="ratio.legend.l2"><i style="background:#8b5cf6"></i>L2 中等 — 判断逻辑要覆盖但不啰嗦</span>'
+        '<span data-i18n="ratio.legend.l3"><i style="background:#10b981"></i>L3 分块 — 按领域切分，只加载需要的块</span>'
+        '<span data-i18n="ratio.legend.l4"><i style="background:#f59e0b"></i>L4 最重 — 领域深度只在对应任务加载</span>'
         '</div></div></section>'
     )
 
-    example_rows = [
-        ("[SIMULATED] ① 捕捉修正信号", "[SIMULATED] L1 · 协作契约", "[SIMULATED] 「看不懂」是修正信号 → 当场照做调整"),
-        ("[SIMULATED] ② 表达适配", "[SIMULATED] L1 · 协作契约", "[SIMULATED] 技术内容翻译成业务语言：这是什么 / 为什么 / 影响什么"),
-        ("[SIMULATED] ③ 判断路径", "[SIMULATED] L2 · 决策逻辑", "[SIMULATED] 先想明白再动手 — 没听懂可能是方案本身没想清楚"),
-        ("[SIMULATED] ④ 背景召回", "[SIMULATED] L3 · 用户画像", "[SIMULATED] 只加载相关块，不碰敏感信息"),
-        ("[SIMULATED] ⑤ 汇报方式", "[SIMULATED] L1 · 协作契约", "[SIMULATED] 结论先行、说人话、改动说明 before/after"),
-        ("[SIMULATED] ⑥ 沉淀闭环", "[SIMULATED] 蒸馏流程", "[SIMULATED] 新偏好 → 确认后进 canonical，不自动改"),
-    ]
     rows = "".join(
-        f"<tr><td>{s}</td><td><code>{f}</code></td><td>{d}</td></tr>" for s, f, d in example_rows
+        f'<tr><td data-i18n="example.r{i}.1">{s}</td><td><code data-i18n="example.r{i}.2">{f}</code></td>'
+        f'<td data-i18n="example.r{i}.3">{d}</td></tr>'
+        for i, (s, f, d) in enumerate(EXAMPLE_ROWS, start=1)
     )
     example = (
         '<section data-reveal class="reveal">'
-        '<div class="section-head"><span class="num">4</span><h2>协同示例 — 一条反馈从进入到响应 <small>[SIMULATED] 虚构演示</small></h2>'
-        '<span class="hint">[SIMULATED] 用户说「这个方案我看不懂」</span></div>'
+        '<div class="section-head"><span class="num">4</span><h2 data-i18n-html="example.head">协同示例 — 一条反馈从进入到响应 <small>[SIMULATED] 虚构演示</small></h2>'
+        '<span class="hint" data-i18n="example.hint">[SIMULATED] 用户说「这个方案我看不懂」</span></div>'
         '<div class="example animate">'
-        '<p class="quote">[SIMULATED] 每个步骤都有明确的文件来源，没有「AI 自己看着办」的模糊地带。</p>'
-        f'<table><thead><tr><th>步骤</th><th>文件</th><th>决策</th></tr></thead><tbody>{rows}</tbody></table>'
+        '<p class="quote" data-i18n="example.quote">[SIMULATED] 每个步骤都有明确的文件来源，没有「AI 自己看着办」的模糊地带。</p>'
+        '<table><thead><tr><th data-i18n="example.th.step">步骤</th><th data-i18n="example.th.file">文件</th>'
+        '<th data-i18n="example.th.decision">决策</th></tr></thead>'
+        f'<tbody>{rows}</tbody></table>'
         '</div></section>'
     )
 
-    principles = [
-        ("[SIMULATED] 分层架构", "[SIMULATED] L1 行为 / L2 判断 / L3 事实 / L4 领域，职责互不重叠", "[SIMULATED] canonical/"),
-        ("[SIMULATED] L3 不发命令", "[SIMULATED] 用户画像只提供事实和默认偏好，不能发出行为命令", "[SIMULATED] L1 · 优先级"),
-        ("[SIMULATED] 用户指令最高", "[SIMULATED] 当前明确要求 &gt; 历史画像；画像不锁定用户", "[SIMULATED] L1 · 硬规则"),
-        ("[SIMULATED] 动态事实先查询", "[SIMULATED] 价格 / 时间 / 距离 / 开放状态先真实查询，严禁脑补", "[SIMULATED] L1 · 怎么配合"),
-        ("[SIMULATED] 修正即素材", "[SIMULATED] 「看不懂 / 不对」当场调整并记录候选，不靠事后回忆", "[SIMULATED] L1 · 捕捉修正"),
-        ("[SIMULATED] 弱信号不采集", "[SIMULATED] 回复变短 / 换话题不记录不归因——无法区分不满与忙碌", "[SIMULATED] L1 · 反馈信号"),
-        ("[SIMULATED] 分块加载", "[SIMULATED] L3 按领域分块、L4 按任务加载，不整篇装入上下文", "[SIMULATED] 加载规则"),
-        ("[SIMULATED] 可信度标记", "[SIMULATED] 每条带 as_of 时间戳 + confirmed / 待确认", "[SIMULATED] 元数据"),
-        ("[SIMULATED] 确认后才写入", "[SIMULATED] 候选经确认后才进 canonical，不自动改", "[SIMULATED] 蒸馏流程"),
-    ]
     prin_rows = "".join(
-        f"<tr><td>{p}</td><td>{e}</td><td><code>{s}</code></td></tr>" for p, e, s in principles
+        f'<tr><td data-i18n="prin.r{i}.1">{p}</td><td data-i18n="prin.r{i}.2">{e}</td>'
+        f'<td><code data-i18n="prin.r{i}.3">{s}</code></td></tr>'
+        for i, (p, e, s) in enumerate(PRINCIPLES, start=1)
     )
     prin = (
         '<section data-reveal class="reveal">'
-        '<div class="section-head"><span class="num">5</span><h2>核心设计原则</h2></div>'
-        f'<div class="principles animate"><table><thead><tr><th>原则</th><th>体现</th><th>出处</th></tr></thead><tbody>{prin_rows}</tbody></table></div>'
+        '<div class="section-head"><span class="num">5</span><h2 data-i18n="prin.head">核心设计原则</h2></div>'
+        '<div class="principles animate"><table><thead>'
+        f'<tr><th data-i18n="prin.th.principle">原则</th><th data-i18n="prin.th.how">体现</th><th data-i18n="prin.th.source">出处</th></tr>'
+        f'</thead><tbody>{prin_rows}</tbody></table></div>'
         '</section>'
     )
 
     maintain = (
         '<section data-reveal class="reveal">'
-        '<div class="section-head"><span class="num">6</span><h2>维护闭环 — 蒸馏不是一次性的</h2>'
-        '<span class="hint">手动更新 · 用户把关</span></div>'
+        '<div class="section-head"><span class="num">6</span><h2 data-i18n="maintain.head">维护闭环 — 蒸馏不是一次性的</h2>'
+        '<span class="hint" data-i18n="maintain.hint">手动更新 · 用户把关</span></div>'
         '<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">'
-        '<div class="kpi animate delay-1"><div class="num">①</div><div class="label">追加</div><div class="hint">新对话整理成统一 Markdown，放进 input/</div></div>'
-        '<div class="kpi animate delay-2"><div class="num">②</div><div class="label">蒸馏</div><div class="hint">重跑 prompts/distill.md 的蒸馏 prompt</div></div>'
-        '<div class="kpi animate delay-3"><div class="num">③</div><div class="label">确认</div><div class="hint">diff 逐条确认后进 canonical</div></div>'
-        '<div class="kpi animate delay-4"><div class="num">④</div><div class="label">构建</div><div class="hint">python3 build.py + install.py 写回 AI 工具</div></div>'
+        '<div class="kpi animate delay-1"><div class="num">①</div><div class="label" data-i18n="maintain.1.label">追加</div><div class="hint" data-i18n="maintain.1.hint">新对话整理成统一 Markdown，放进 input/</div></div>'
+        '<div class="kpi animate delay-2"><div class="num">②</div><div class="label" data-i18n="maintain.2.label">蒸馏</div><div class="hint" data-i18n="maintain.2.hint">重跑 prompts/distill.md 的蒸馏 prompt</div></div>'
+        '<div class="kpi animate delay-3"><div class="num">③</div><div class="label" data-i18n="maintain.3.label">确认</div><div class="hint" data-i18n="maintain.3.hint">diff 逐条确认后进 canonical</div></div>'
+        '<div class="kpi animate delay-4"><div class="num">④</div><div class="label" data-i18n="maintain.4.label">构建</div><div class="hint" data-i18n="maintain.4.hint">python3 build.py + install.py 写回 AI 工具</div></div>'
         '</div></section>'
     )
 
     footer = (
         '<footer>'
-        '<p>canonical/ · selfdistill 蒸馏我 — 让 AI 按使用者的思维方式配合</p>'
-        '<p style="margin-top:.5rem">L3 画像含 <code>[SENSITIVE]</code> 健康 / 财务 / 家庭细节，本页只展示结构与标签，不展示敏感原文；本页为示例数据</p>'
+        f'<p data-i18n="footer.1">canonical/ · selfdistill 蒸馏我 — 让 AI 按使用者的思维方式配合</p>'
+        f'<p style="margin-top:.5rem" data-i18n-html="footer.2">L3 画像含 <code>[SENSITIVE]</code> 健康 / 财务 / 家庭细节，本页只展示结构与标签，不展示敏感原文；本页为示例数据</p>'
         '</footer>'
     )
 
     body = f'<main id="main-content" class="wrap" role="main">{hero}{kpis}{files}{arch}{ratio}{example}{prin}{maintain}</main>{footer}'
-    return page("selfdistill · 蒸馏我", VIZ_MENU + body, assets["index_css"], assets["index_js"])
+    return page("selfdistill · 蒸馏我", VIZ_MENU + body, assets["index_css"], assets["index_js"], i18n_data=i18n_data)
 
 
 # ---------- 内页 ----------
@@ -573,9 +834,9 @@ def build_layer(title: str, content: str, slug: str, sub: str, assets: dict) -> 
 
 def build_raw(title: str, text: str, assets: dict) -> str:
     body = (
-        '<header class="hero"><a class="back" href="index.html">← 返回主页</a>'
-        f'<h1>{html.escape(title)} · 原始报告</h1>'
-        '<p class="simulated-banner">以下内容为虚构示例，不代表真实个人身份。</p></header>'
+        '<header class="hero"><a class="back" href="index.html" data-i18n="raw.back">← 返回主页</a>'
+        f'<h1>{html.escape(title)}<span data-i18n="raw.suffix"> · 原始报告</span></h1>'
+        '<p class="simulated-banner" data-i18n="hero.simulated">以下内容为虚构示例，不代表真实个人身份。</p></header>'
         f'<pre style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.3rem 1.5rem;font-family:Menlo,monospace;font-size:.84rem;line-height:1.7;white-space:pre-wrap;overflow-wrap:break-word">{html.escape(text)}</pre>'
     )
     return page(title, f'<main class="wrap">{body}</main>', assets["layer_css"], assets["layer_js"])
@@ -721,8 +982,11 @@ def main() -> int:
 
     (DIST / "index.html").write_text(build_home(domains, sizes, assets), encoding="utf-8")
     # 内页：复制 showcase 成品脱敏副本（手工编排的呈现效果，不自动生成）
+    # 注入中/EN 切换按钮与 i18n 脚本（模板文案自带 data-i18n 属性）；{n} 为页序
     for name, rendered in template_texts.items():
-        (DIST / f"{name}.html").write_text(hide_simulated_markers(rendered), encoding="utf-8")
+        (DIST / f"{name}.html").write_text(
+            inject_i18n_template(hide_simulated_markers(rendered), {"n": int(name[1])}),
+            encoding="utf-8")
     # raw 页：从 canonical 生成
     layers = [
         ("L1 协作契约", l1, "l1"),
