@@ -663,12 +663,12 @@ def parse_deepseek(path: Path) -> tuple:
                     content = fr.get("content")
                     content = content.strip() if isinstance(content, str) else ""
                     if ftype == "REQUEST":
-                        role = "user"
                         if content:
+                            role = "user"
                             text_parts.append(content)
                     elif ftype == "RESPONSE":
-                        role = "assistant"
                         if content:
+                            role = "assistant"
                             text_parts.append(content)
                     elif ftype == "THINK":
                         if _INCLUDE_THINKING and content:
@@ -1548,10 +1548,6 @@ def print_report(total: int, outputs: int, new: int, updated: int, dup: int, ski
     if by_reason:
         detail = "；".join(reason + (f" ×{n}" if n > 1 else "") for reason, n in sorted(by_reason.items()))
         print(f"  解析/写入失败 {len(failures)}：{detail}")
-        for ref, reason in failures[:15]:
-            print(f"    - {ref}: {reason}")
-        if len(failures) > 15:
-            print(f"    … 及另外 {len(failures) - 15} 条")
     if not failures:
         print("完成。写入目录见各文件（本地处理，不上传）。")
 

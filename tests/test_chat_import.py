@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
 import unittest.mock
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 
@@ -158,6 +160,27 @@ class ParserTests(unittest.TestCase):
             reasons = [reason for _ref, reason in skipped if "混合 REQUEST/RESPONSE" in reason]
             self.assertTrue(reasons)
             self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
+
+    def test_deepseek_empty_opposite_role_never_overwrites_visible_role(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations.json"
+            for fragments, expected_role in (
+                ([{"type": "REQUEST", "content": "visible request"},
+                  {"type": "RESPONSE", "content": "  "},
+                  {"type": "FILE", "files": [{"file_name": "request.txt"}]}], "user"),
+                ([{"type": "RESPONSE", "content": "visible response"},
+                  {"type": "REQUEST", "content": ""},
+                  {"type": "FILE", "files": [{"file_name": "response.txt"}]}], "assistant"),
+            ):
+                with self.subTest(expected_role=expected_role):
+                    p.write_text(json.dumps([{"id": "roles", "mapping": {
+                        "m": {"parent": None, "children": [], "message": {"fragments": fragments}},
+                    }}]), encoding="utf-8")
+                    convs, skipped, total = ic.parse_deepseek(p)
+                    self.assertEqual((total, len(convs)), (1, 1))
+                    self.assertEqual(convs[0][4][0][0], expected_role)
+                    self.assertIn("[附件:", convs[0][4][0][3])
+                    self.assertFalse(skipped)
 
     def test_deepseek_nested_file_metadata_is_not_stringified(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1349,6 +1372,19 @@ class CliTests(unittest.TestCase):
             self.assertIn("预期内部内容排除 1 个片段", r.stdout)
             self.assertIn("解析/写入失败 1", r.stdout)
             self.assertFalse(out.exists())
+
+    def test_report_aggregates_failure_reasons_without_raw_private_refs(self) -> None:
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            ic.print_report(2, 1, 1, 0, 0, [
+                ("private-title-secret-123", "结构损坏"),
+                ("another-private-ref", "结构损坏"),
+            ], "chatgpt", False)
+        report = stream.getvalue()
+        self.assertIn("解析/写入失败 2", report)
+        self.assertIn("结构损坏 ×2", report)
+        self.assertNotIn("private-title-secret-123", report)
+        self.assertNotIn("another-private-ref", report)
 
 
 if __name__ == "__main__":
