@@ -110,6 +110,108 @@ class ParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ic.ImportError_, "会话 mapping 存在循环"):
             ic._root_to_leaf_paths(cycle)
 
+    def test_graph_references_reject_nested_bool_and_blank_values(self) -> None:
+        valid_numeric = {
+            "1": {"parent": None, "children": [2]},
+            "2": {"parent": 1, "children": []},
+        }
+        self.assertEqual(ic._root_to_leaf_paths(valid_numeric), [["1", "2"]])
+        invalid_mappings = [
+            {1: {"parent": None}},
+            {"": {"parent": None}},
+            {"root": {"parent": []}},
+            {"root": {"parent": {"nested": "value"}}},
+            {"root": {"parent": True}},
+            {"root": {"parent": ""}},
+            {"root": {"parent": None, "children": [[]]}},
+            {"root": {"parent": None, "children": [{"nested": "value"}]}},
+            {"root": {"parent": None, "children": [True]}},
+            {"root": {"parent": None, "children": [""]}},
+        ]
+        for mapping in invalid_mappings:
+            with self.subTest(mapping=mapping):
+                with self.assertRaisesRegex(ic.ImportError_, "会话 mapping"):
+                    ic._root_to_leaf_paths(mapping)
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            base = {"id": "safe", "mapping": {
+                "root": {"parent": None, "children": ["message"]},
+                "message": {"parent": "root", "children": [], "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["visible"]}}},
+            }}
+            for malformed_current in ({"secret": "nested"}, ["nested"], True, ""):
+                with self.subTest(current=type(malformed_current).__name__):
+                    record = dict(base, current_node=malformed_current)
+                    p.write_text(json.dumps([record]), encoding="utf-8")
+                    convs, skipped, _total = ic.parse_chatgpt(p)
+                    self.assertEqual(convs, [])
+                    self.assertEqual([reason for _ref, reason in skipped], ["ChatGPT current_node 引用无效"])
+                    report = io.StringIO()
+                    with redirect_stdout(report):
+                        ic.print_report(1, 0, 0, 0, 0, skipped, "chatgpt", False)
+                    self.assertNotIn("secret", report.getvalue())
+
+    def test_graph_references_reject_nonfinite_floats_without_leaking(self) -> None:
+        for nonfinite in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(location="parent", value=repr(nonfinite)):
+                mapping = {
+                    "root": {"parent": None, "children": ["child"]},
+                    "child": {"parent": nonfinite, "children": []},
+                }
+                with self.assertRaisesRegex(ic.ImportError_, "会话 mapping 引用无效"):
+                    ic._root_to_leaf_paths(mapping)
+            with self.subTest(location="children", value=repr(nonfinite)):
+                mapping = {"root": {"parent": None, "children": [nonfinite]}}
+                with self.assertRaisesRegex(ic.ImportError_, "会话 mapping 引用无效"):
+                    ic._root_to_leaf_paths(mapping)
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            mapping = {
+                "root": {"parent": None, "children": ["message"]},
+                "message": {"parent": "root", "children": [], "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["visible"]}}},
+            }
+            for nonfinite in (float("nan"), float("inf"), -float("inf")):
+                with self.subTest(location="current_node", value=repr(nonfinite)):
+                    p.write_text(json.dumps([{
+                        "id": "safe", "title": "private-title", "mapping": mapping,
+                        "current_node": nonfinite,
+                    }]), encoding="utf-8")
+                    convs, skipped, _total = ic.parse_chatgpt(p)
+                    self.assertEqual(convs, [])
+                    self.assertEqual(
+                        [reason for _ref, reason in skipped],
+                        ["ChatGPT current_node 引用无效"],
+                    )
+                    report = io.StringIO()
+                    with redirect_stdout(report):
+                        ic.print_report(1, 0, 0, 0, 0, skipped, "chatgpt", False)
+                    self.assertNotIn("private-title", report.getvalue())
+
+    def test_chatgpt_valid_current_comb_does_not_materialize_fallback_paths(self) -> None:
+        depth = 2000
+        mapping = {"root": {"parent": None}}
+        parent = "root"
+        for i in range(depth):
+            node_id = f"main-{i}"
+            mapping[node_id] = {"parent": parent}
+            mapping[f"regen-{i}"] = {"parent": node_id}
+            parent = node_id
+        mapping[parent]["message"] = {"author": {"role": "user"}, "content": {"parts": ["active"]}}
+        record = {"id": "comb", "current_node": parent, "mapping": mapping}
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([record]), encoding="utf-8")
+            with unittest.mock.patch.object(ic, "_materialize_root_to_leaf_paths",
+                                            wraps=ic._materialize_root_to_leaf_paths) as materialize:
+                convs, skipped, _total = ic.parse_chatgpt(p)
+        self.assertEqual(materialize.call_count, 0)
+        self.assertEqual(skipped, [])
+        self.assertEqual(len(convs), 1)
+        self.assertEqual([m[3] for m in convs[0][4]], ["active"])
+
     def test_chatgpt_current_node_uses_parent_derived_children(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "conversations-000.json"
@@ -462,6 +564,36 @@ class ParserTests(unittest.TestCase):
                          "<environment_context>literal code</environment_context>")
         self.assertEqual(ic._clean_codex_user("<image>literal code</image>"),
                          "<image>literal code</image>")
+
+    def test_codex_preserved_ambiguous_system_markers_are_reported_once(self) -> None:
+        secret = "private-ambiguous-wrapper"
+        ambiguous = (f"<environment_context>{secret}</environment_context>\n"
+                     "I mention # AGENTS.md instructions in a note.\n"
+                     "Automation: literal user prose\n"
+                     "# Files mentioned by the user: literal user prose")
+        events = []
+        self.assertEqual(ic._clean_codex_user(ambiguous, events), ambiguous)
+        self.assertEqual(events, ["Codex 疑似系统包装已保留待复核"])
+
+        generic_events = []
+        generic = "<name>Ada</name><path>/safe</path><string>keep</string><prompt>keep</prompt>"
+        self.assertEqual(ic._clean_codex_user(generic, generic_events), generic)
+        self.assertEqual(generic_events, [])
+
+        removed_events = []
+        self.assertEqual(ic._clean_codex_user(
+            "<environment_context><cwd>/work</cwd><shell>zsh</shell></environment_context>visible",
+            removed_events), "visible")
+        self.assertIn("内部内容已排除：Codex 系统包装", removed_events)
+        self.assertNotIn("Codex 疑似系统包装已保留待复核", removed_events)
+
+        report = io.StringIO()
+        with redirect_stdout(report):
+            ic.print_report(1, 1, 0, 0, 0,
+                            [("private-ref", event) for event in events], "local", False)
+        self.assertIn("Codex 疑似系统包装已保留待复核", report.getvalue())
+        self.assertNotIn(secret, report.getvalue())
+        self.assertNotIn("private-ref", report.getvalue())
 
     def test_codex_repeated_leading_wrappers_and_prefix_records_are_dropped(self) -> None:
         nested = ("<environment_context><cwd>/one</cwd><shell>zsh</shell></environment_context>\n"
@@ -1682,6 +1814,41 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("预计新导入 1", output)
             self.assertIn("无消息", output)
+
+    def test_default_local_stat_failure_is_reported_and_mixed_batch_is_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            good = root / "good.jsonl"
+            bad = root / "private-name.jsonl"
+            record = {"timestamp": "2026-08-01T10:00:00Z", "type": "response_item",
+                      "payload": {"type": "message", "role": "user",
+                                  "content": [{"type": "input_text", "text": "visible"}]}}
+            good.write_text(json.dumps(record), encoding="utf-8")
+            bad.write_text(json.dumps(record), encoding="utf-8")
+            roots = (("codex", str(root), "*.jsonl"),)
+            original_stat = Path.stat
+
+            def failing_stat(path, *args, **kwargs):
+                if path == bad:
+                    raise OSError("private stat detail")
+                return original_stat(path, *args, **kwargs)
+
+            with unittest.mock.patch.object(Path, "stat", new=failing_stat):
+                failures = []
+                found = ic.discover_local(roots=roots, failures=failures)
+                self.assertEqual(len(found), 1)
+                self.assertEqual(failures, [("—", "本地会话状态读取失败")])
+                stream = io.StringIO()
+                argv = ["import_chats.py", "--source", "local", "--root", str(Path(td) / "out"), "--dry-run"]
+                with (unittest.mock.patch.object(ic, "LOCAL_ROOTS", roots),
+                      unittest.mock.patch.object(sys, "argv", argv),
+                      redirect_stdout(stream)):
+                    self.assertEqual(ic.main(), 2)
+            self.assertIn("本地会话状态读取失败", stream.getvalue())
+            self.assertIn("预计新导入 1", stream.getvalue())
+            self.assertNotIn("private-name", stream.getvalue())
+            self.assertNotIn("private stat detail", stream.getvalue())
 
     def test_zip_read_runtime_error_becomes_import_error(self) -> None:
         fake = unittest.mock.MagicMock()

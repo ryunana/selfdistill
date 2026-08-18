@@ -19,6 +19,7 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -160,22 +161,40 @@ def _path_fingerprint(path: list[str]) -> str:
     return hashlib.sha1("\x1f".join(path).encode("utf-8")).hexdigest()[:12]
 
 
-def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
-    """Return validated parent-linked paths.  A tree error must not be flattened."""
+def _graph_reference(value, *, allow_null: bool = False) -> Optional[str]:
+    """Normalize a JSON graph reference without stringifying containers or bools."""
+    if value is None and allow_null:
+        return None
+    if isinstance(value, str):
+        reference = value
+    elif (isinstance(value, (int, float)) and not isinstance(value, bool)
+          and (not isinstance(value, float) or math.isfinite(value))):
+        reference = str(value)
+    else:
+        raise ImportError_("会话 mapping 引用无效")
+    if not reference.strip():
+        raise ImportError_("会话 mapping 引用无效")
+    return reference
+
+
+def _validate_conversation_graph(mapping: dict) -> tuple[dict[str, dict], dict[str, Optional[str]], dict[str, list[str]]]:
+    """Validate once and return normalized nodes, parent links, and derived children."""
     if not isinstance(mapping, dict) or not mapping:
         raise ImportError_("会话 mapping 为空或结构损坏")
-    nodes = {str(nid): node for nid, node in mapping.items() if isinstance(node, dict)}
-    if not nodes:
-        raise ImportError_("会话 mapping 没有有效节点")
-    roots = [nid for nid, node in nodes.items() if node.get("parent") is None]
+    nodes: dict[str, dict] = {}
+    for nid, node in mapping.items():
+        if not isinstance(nid, str) or not nid.strip() or not isinstance(node, dict):
+            raise ImportError_("会话 mapping 节点或引用无效")
+        nodes[nid] = node
+    parents = {nid: _graph_reference(node.get("parent"), allow_null=True)
+               for nid, node in nodes.items()}
+    roots = [nid for nid, parent in parents.items() if parent is None]
     if len(roots) != 1:
         raise ImportError_("会话 mapping 必须恰有一个根节点")
     children: dict[str, list[str]] = {nid: [] for nid in nodes}
-    for nid, node in nodes.items():
-        parent = node.get("parent")
+    for nid, parent in parents.items():
         if parent is None:
             continue
-        parent = str(parent)
         if parent not in nodes:
             raise ImportError_("会话 mapping 存在断链")
         children[parent].append(nid)
@@ -188,13 +207,13 @@ def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
         raw_declared = node["children"]
         if not isinstance(raw_declared, list):
             raise ImportError_("会话 mapping 的 children 不是列表")
-        normalized_declared = [str(child) for child in raw_declared]
+        normalized_declared = [_graph_reference(child) for child in raw_declared]
         if len(normalized_declared) != len(set(normalized_declared)):
             raise ImportError_("会话 mapping 的 children 存在重复引用")
         for child in normalized_declared:
             if child not in nodes:
                 raise ImportError_("会话 mapping 存在断链")
-            if str(nodes[child].get("parent")) != nid:
+            if parents[child] != nid:
                 raise ImportError_("会话 mapping 的 parent/children 不一致")
         if set(normalized_declared) != set(children[nid]):
             raise ImportError_("会话 mapping 的 parent/children 不一致")
@@ -215,47 +234,43 @@ def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
                 break
             colors[nid] = 1
             trail.append(nid)
-            parent = nodes[nid].get("parent")
-            nid = str(parent) if parent is not None else None
+            nid = parents[nid]
         for visited in trail:
             colors[visited] = 2
+    return nodes, parents, children
+
+
+def _path_from_parents(parents: dict[str, Optional[str]], node_id: str) -> list[str]:
+    """Materialize one already-validated parent chain without recursion."""
+    if node_id not in parents:
+        raise ImportError_("current_node 不存在或不是有效节点")
+    chain = []
+    nid: Optional[str] = node_id
+    while nid is not None:
+        chain.append(nid)
+        nid = parents[nid]
+    return list(reversed(chain))
+
+
+def _materialize_root_to_leaf_paths(parents: dict[str, Optional[str]],
+                                    children: dict[str, list[str]]) -> list[list[str]]:
+    """Build fallback root-to-leaf paths after graph validation."""
     leaves = sorted(nid for nid, kids in children.items() if not kids)
     if not leaves:
         raise ImportError_("会话 mapping 没有叶子节点（可能存在循环）")
-    paths = []
-    for leaf in leaves:
-        chain = []
-        seen = set()
-        nid: Optional[str] = leaf
-        while nid is not None:
-            if nid in seen:
-                raise ImportError_("会话 mapping 存在循环")
-            seen.add(nid)
-            chain.append(nid)
-            parent = nodes[nid].get("parent")
-            nid = str(parent) if parent is not None else None
-        paths.append(list(reversed(chain)))
-    return paths
+    return [_path_from_parents(parents, leaf) for leaf in leaves]
+
+
+def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
+    """Return validated parent-linked fallback paths.  A tree error must not flatten."""
+    _nodes, parents, children = _validate_conversation_graph(mapping)
+    return _materialize_root_to_leaf_paths(parents, children)
 
 
 def _path_to_node(mapping: dict, node_id: str) -> list[str]:
     """Validate and return the path ending at the explicitly active node."""
-    nodes = {str(nid): node for nid, node in mapping.items() if isinstance(node, dict)}
-    if node_id not in nodes:
-        raise ImportError_("current_node 不存在或不是有效节点")
-    chain = []
-    seen = set()
-    nid: Optional[str] = node_id
-    while nid is not None:
-        if nid in seen:
-            raise ImportError_("会话 mapping 存在循环")
-        seen.add(nid)
-        chain.append(nid)
-        parent = nodes[nid].get("parent")
-        if parent is not None and str(parent) not in nodes:
-            raise ImportError_("会话 mapping 存在断链")
-        nid = str(parent) if parent is not None else None
-    return list(reversed(chain))
+    _nodes, parents, _children = _validate_conversation_graph(mapping)
+    return _path_from_parents(parents, _graph_reference(node_id))
 
 
 def _chatgpt_parts(parts) -> tuple[str, int]:
@@ -337,17 +352,25 @@ def parse_chatgpt(path: Path) -> tuple:
             if malformed:
                 skipped.append(("—", "会话消息结构不是对象"))
                 continue
-            current = conv.get("current_node")
-            has_valid_current = bool(current and str(current) in mapping)
             try:
                 # Validate the whole graph first.  A current_node selects the
                 # active path; it never excuses malformed inactive branches.
-                fallback_paths = _root_to_leaf_paths(mapping)
-                paths = ([_path_to_node(mapping, str(current))]
-                         if has_valid_current else fallback_paths)
-            except ImportError_ as e:
+                nodes, parents, children = _validate_conversation_graph(mapping)
+            except ImportError_:
                 skipped.append(("—", "会话 mapping 结构损坏"))
                 continue
+            current_present = "current_node" in conv and conv.get("current_node") is not None
+            if current_present:
+                try:
+                    current = _graph_reference(conv.get("current_node"))
+                except ImportError_:
+                    skipped.append(("—", "ChatGPT current_node 引用无效"))
+                    continue
+            else:
+                current = None
+            has_valid_current = current is not None and current in nodes
+            paths = ([_path_from_parents(parents, current)] if has_valid_current
+                     else _materialize_root_to_leaf_paths(parents, children))
             valid = []
             unknown_role_nodes: set[str] = set()
             known_internal_role_nodes: set[str] = set()
@@ -356,7 +379,7 @@ def parse_chatgpt(path: Path) -> tuple:
             for node_path in paths:
                 msgs = []
                 for nid in node_path:
-                    node = mapping[nid]
+                    node = nodes[nid]
                     if not isinstance(node.get("message"), dict):
                         continue
                     msg = node["message"]
@@ -827,6 +850,8 @@ _CODEX_AGENTS_RE = re.compile(
     re.I | re.S)
 _CODEX_ABORT_RE = re.compile(r"^\s*<turn_aborted\b[^>]*>.*?(?:</turn_aborted>|$)\s*$", re.I | re.S)
 _CODEX_PREFIX_RECORDS = ("# Files mentioned by the user:", "# In app browser:")
+_CODEX_RESIDUAL_ENVELOPE_RE = re.compile(
+    rf"<(?:{'|'.join(re.escape(tag) for tag in _CODEX_ENVELOPE_TAGS)})\b", re.I)
 
 
 def _clean_codex_user(text: str, events: Optional[list[str]] = None) -> str:
@@ -858,7 +883,20 @@ def _clean_codex_user(text: str, events: Optional[list[str]] = None) -> str:
             events.append("内部内容已排除：Codex 前置文件或浏览器上下文")
         return ""
     text = _CODEX_IMAGE_PLACEHOLDER_RE.sub("[图片]", text)
-    return text.strip()
+    text = text.strip()
+    if text and events is not None and _has_ambiguous_codex_residual(text):
+        events.append("Codex 疑似系统包装已保留待复核")
+    return text
+
+
+def _has_ambiguous_codex_residual(text: str) -> bool:
+    """Flag only preserved provider-like wrappers, never ordinary XML alone."""
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return bool(_CODEX_RESIDUAL_ENVELOPE_RE.search(text)
+                or re.search(r"#\s*AGENTS\.md instructions\b", text, re.I)
+                or re.search(r"\bAutomation:\s*", text, re.I)
+                or any(marker in text for marker in _CODEX_PREFIX_RECORDS)
+                or first in _CODEX_PREFIX_RECORDS)
 
 
 def _is_known_codex_envelope(tag: str, body: str) -> bool:
@@ -1594,6 +1632,8 @@ def discover_local(since: Optional[str] = None, excludes: tuple = (), roots: tup
             try:
                 size = p.stat().st_size
             except OSError:
+                if failures is not None:
+                    failures.append(("—", "本地会话状态读取失败"))
                 continue
             if size == 0:
                 if failures is not None:
