@@ -1266,9 +1266,31 @@ class CliTests(unittest.TestCase):
         unowned_path = unowned / "chatgpt-a-b.md"
         original = "<!-- distill-messages:begin -->\n旧正文\n<!-- distill-messages:end -->\n"
         unowned_path.write_text(original, encoding="utf-8")
-        with self.assertRaisesRegex(ic.ImportError_, "所有权元数据"):
+        with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是导入器目录"):
             ic.write_conversation(first, {}, unowned)
         self.assertEqual(unowned_path.read_text(encoding="utf-8"), original)
+
+    def test_batch_root_preflight_scans_managed_files_linearly(self) -> None:
+        out = self._tmp()
+        imported = {}
+        seed = ("chatgpt", "seed", "seed", "2026-08-01", [("user", None, "seed", "seed")])
+        self.assertEqual(ic.write_conversation(seed, imported, out), "new")
+        conversations = [
+            ("chatgpt", f"batch-{i}", "title", "2026-08-01",
+             [("user", None, f"m-{i}", "visible")])
+            for i in range(80)
+        ]
+        original_managed = ic._is_managed_markdown
+        original_guard = ic._assert_output_root_ownership
+        with (unittest.mock.patch.object(ic, "_is_managed_markdown", wraps=original_managed) as managed,
+              unittest.mock.patch.object(ic, "_assert_output_root_ownership", wraps=original_guard) as guard):
+            total, outputs, new, updated, dup, skipped = ic.import_convs(
+                conversations, [], len(conversations), imported, out, dry_run=False)
+        self.assertEqual((total, outputs, new, updated, dup, skipped), (80, 80, 80, 0, 0, []))
+        # One complete preflight plus save_imported's final revalidation; the
+        # 80 writes must not each rescan the growing Markdown directory.
+        self.assertEqual(guard.call_count, 2)
+        self.assertLessEqual(managed.call_count, 2 * (len(conversations) + 1) + 2)
 
     def test_same_batch_conversation_key_is_rejected_without_overwriting_first(self) -> None:
         out = self._tmp()
@@ -1330,6 +1352,144 @@ class CliTests(unittest.TestCase):
                 ic.load_imported(nested)
             self.assertFalse((external / "nested").exists())
             self.assertEqual(os.stat(external).st_mode & 0o777, 0o755)
+
+    def test_output_root_ownership_guard_adopts_only_importer_directories(self) -> None:
+        conv = ("chatgpt", "owned", "title", "2026-08-01", [("user", None, "u", "visible")])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            broad = {Path("/").resolve(), Path.home().resolve(), Path.cwd().resolve(),
+                     ic.ROOT.resolve(), Path(tempfile.gettempdir()).resolve()}
+            for candidate in broad:
+                with self.subTest(broad=candidate.name or "root"):
+                    mode = os.stat(candidate).st_mode & 0o777
+                    with self.assertRaisesRegex(ic.ImportError_, "输出根目录过于宽泛"):
+                        ic.write_conversation(conv, {}, candidate)
+                    self.assertEqual(os.stat(candidate).st_mode & 0o777, mode)
+
+            unrelated = root / "unrelated"
+            unrelated.mkdir()
+            note = unrelated / "notes.txt"
+            note.write_text("unrelated", encoding="utf-8")
+            os.chmod(unrelated, 0o755)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是导入器目录"):
+                ic.write_conversation(conv, {}, unrelated)
+            self.assertEqual(os.stat(unrelated).st_mode & 0o777, 0o755)
+            self.assertEqual(note.read_text(encoding="utf-8"), "unrelated")
+            self.assertFalse(ic.imported_path(unrelated).exists())
+            self.assertFalse(list(unrelated.glob("*.md")))
+
+            file_root = root / "output-file"
+            file_root.write_text("file", encoding="utf-8")
+            os.chmod(file_root, 0o644)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是目录"):
+                ic.write_conversation(conv, {}, file_root)
+            self.assertEqual(file_root.read_text(encoding="utf-8"), "file")
+            self.assertEqual(os.stat(file_root).st_mode & 0o777, 0o644)
+
+            empty = root / "empty"
+            empty.mkdir()
+            self.assertEqual(ic.write_conversation(conv, {}, empty), "new")
+            self.assertEqual(os.stat(empty).st_mode & 0o777, 0o700)
+
+            state_dir = root / "state-dir"
+            imported = {}
+            self.assertEqual(ic.write_conversation(conv, imported, state_dir), "new")
+            ic.save_imported(imported, state_dir)
+            os.chmod(state_dir, 0o755)
+            self.assertEqual(ic.write_conversation(conv, imported, state_dir), "dup")
+            self.assertEqual(os.stat(state_dir).st_mode & 0o777, 0o700)
+
+            recovery = root / "recovery"
+            recovered_state = {}
+            self.assertEqual(ic.write_conversation(conv, recovered_state, recovery), "new")
+            ic.save_imported(recovered_state, recovery)
+            ic.imported_path(recovery).unlink()
+            self.assertEqual(ic.write_conversation(conv, {}, recovery), "dup")
+
+            isolated_input = root / "input"
+            isolated_input.mkdir()
+            (isolated_input / ".gitkeep").write_text("", encoding="utf-8")
+            with unittest.mock.patch.object(ic, "INPUT_DIR", isolated_input):
+                self.assertEqual(ic.load_imported(isolated_input), {})
+                self.assertEqual(ic.write_conversation(conv, {}, isolated_input), "new")
+
+    def test_output_root_state_never_authorizes_unmanaged_markdown(self) -> None:
+        conv = ("chatgpt", "owned", "title", "2026-08-01", [("user", None, "u", "visible")])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            valid_with_note = root / "valid-with-note"
+            valid_with_note.mkdir()
+            state = ic.imported_path(valid_with_note)
+            state.write_text("{}", encoding="utf-8")
+            note = valid_with_note / "notes.md"
+            note.write_text("ordinary note", encoding="utf-8")
+            os.chmod(valid_with_note, 0o755)
+            os.chmod(note, 0o644)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是导入器目录"):
+                ic.write_conversation(conv, {}, valid_with_note)
+            self.assertEqual(note.read_text(encoding="utf-8"), "ordinary note")
+            self.assertEqual(state.read_text(encoding="utf-8"), "{}")
+            self.assertEqual(os.stat(valid_with_note).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(note).st_mode & 0o777, 0o644)
+
+            corrupt_with_note = root / "corrupt-with-note"
+            corrupt_with_note.mkdir()
+            corrupt_state = ic.imported_path(corrupt_with_note)
+            corrupt_state.write_text("{broken", encoding="utf-8")
+            corrupt_note = corrupt_with_note / "notes.md"
+            corrupt_note.write_text("ordinary note", encoding="utf-8")
+            os.chmod(corrupt_with_note, 0o755)
+            os.chmod(corrupt_note, 0o644)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是导入器目录"):
+                ic.load_imported(corrupt_with_note)
+            self.assertEqual(corrupt_state.read_text(encoding="utf-8"), "{broken")
+            self.assertEqual(corrupt_note.read_text(encoding="utf-8"), "ordinary note")
+            self.assertEqual(os.stat(corrupt_with_note).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(corrupt_note).st_mode & 0o777, 0o644)
+
+            managed = root / "managed"
+            self.assertEqual(ic.write_conversation(conv, {}, managed), "new")
+            managed_state = ic.imported_path(managed)
+            managed_state.write_text("{}", encoding="utf-8")
+            self.assertEqual(ic.load_imported(managed), {})
+            self.assertEqual(ic.write_conversation(conv, {}, managed), "dup")
+
+            managed_state.unlink()
+            self.assertEqual(ic.load_imported(managed), {})
+            self.assertEqual(ic.write_conversation(conv, {}, managed), "dup")
+
+    def test_default_local_zero_byte_sessions_are_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            zero = root / "zero.jsonl"
+            zero.write_bytes(b"")
+            roots = (("codex", str(root), "*.jsonl"),)
+            failures = []
+            self.assertEqual(ic.discover_local(roots=roots, failures=failures), [])
+            self.assertEqual(failures, [("—", ic.SKIP_EMPTY)])
+
+            def default_local_result(out: Path) -> tuple[int, str]:
+                stream = io.StringIO()
+                argv = ["import_chats.py", "--source", "local", "--root", str(out), "--dry-run"]
+                with (unittest.mock.patch.object(ic, "LOCAL_ROOTS", roots),
+                      unittest.mock.patch.object(sys, "argv", argv),
+                      redirect_stdout(stream)):
+                    return ic.main(), stream.getvalue()
+
+            code, output = default_local_result(Path(td) / "zero-out")
+            self.assertEqual(code, 1)
+            self.assertIn("无消息", output)
+
+            (root / "visible.jsonl").write_text(json.dumps({
+                "type": "response_item", "payload": {"type": "message", "role": "user",
+                                                             "content": [{"type": "input_text", "text": "visible"}]},
+            }), encoding="utf-8")
+            code, output = default_local_result(Path(td) / "mixed-out")
+            self.assertEqual(code, 2)
+            self.assertIn("预计新导入 1", output)
+            self.assertIn("无消息", output)
 
     def test_zip_read_runtime_error_becomes_import_error(self) -> None:
         fake = unittest.mock.MagicMock()
@@ -1400,7 +1560,7 @@ class CliTests(unittest.TestCase):
             export.write_text(json.dumps([conversation("reverse", "m3", "replacement")]), encoding="utf-8")
             reverse_run = run_import("--source", "chatgpt", "--path", str(export), "--root", str(out), "--yes")
             self.assertEqual(reverse_run.returncode, 1, reverse_run.stdout + reverse_run.stderr)
-            self.assertIn("消息标记顺序损坏", reverse_run.stdout)
+            self.assertIn("输出根目录不是导入器目录", reverse_run.stderr)
             self.assertNotIn("Traceback", reverse_run.stderr)
 
     def test_duplicate_restores_permissions_but_dry_run_is_write_free(self) -> None:

@@ -1240,7 +1240,98 @@ def imported_path(out_dir: Path) -> Path:
     return out_dir / ".imported.json"
 
 
-def _assert_safe_output_root(out_dir: Path) -> None:
+def _validate_imported_state(data) -> dict:
+    if not isinstance(data, dict):
+        raise ImportError_("状态文件结构损坏，未修改（期望 JSON 对象）")
+    for key, entry in data.items():
+        if not isinstance(key, str) or ":" not in key:
+            raise ImportError_("状态文件结构损坏，未修改（会话键无效）")
+        state_source, state_cid = key.split(":", 1)
+        if not state_source or not state_cid:
+            raise ImportError_("状态文件结构损坏，未修改（会话键无效）")
+        if not isinstance(entry, dict):
+            raise ImportError_("状态文件结构损坏，未修改（会话记录不是对象）")
+        path = entry.get("path")
+        imported_at = entry.get("imported_at")
+        title = entry.get("title")
+        message_ids = entry.get("message_ids")
+        if (not isinstance(path, str) or not path or not isinstance(imported_at, str)
+                or not isinstance(title, str) or not isinstance(message_ids, list)
+                or any(not isinstance(mid, str) or not mid for mid in message_ids)
+                or len(message_ids) != len(set(message_ids))):
+            raise ImportError_("状态文件结构损坏，未修改（会话字段无效）")
+    return data
+
+
+def _is_valid_imported_state(path: Path) -> bool:
+    try:
+        _validate_imported_state(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ImportError_):
+        return False
+    return True
+
+
+def _is_managed_markdown(path: Path) -> bool:
+    if path.is_symlink() or not path.is_file() or path.suffix != ".md":
+        return False
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    sources = re.findall(r"^<!-- source: (.*?) -->\s*$", content, re.MULTILINE)
+    cids = re.findall(r"^<!-- conversation_id: (.*?) -->\s*$", content, re.MULTILINE)
+    begin = "<!-- distill-messages:begin -->"
+    end = "<!-- distill-messages:end -->"
+    return (len(sources) == 1 and len(cids) == 1 and content.count(begin) == 1
+            and content.count(end) == 1 and content.find(begin) < content.find(end))
+
+
+def _assert_output_root_ownership(out_dir: Path, allow_invalid_state: bool = False) -> None:
+    """Permit mutation only in a narrow importer-owned output directory."""
+    resolved = out_dir.resolve(strict=False)
+    broad_anchors = {Path("/").resolve(), Path.home().resolve(), Path.cwd().resolve(),
+                     ROOT.resolve(), Path(tempfile.gettempdir()).resolve()}
+    if resolved in broad_anchors:
+        raise ImportError_("输出根目录过于宽泛，拒绝访问")
+    if not out_dir.exists():
+        return
+    if not out_dir.is_dir():
+        raise ImportError_("输出根目录不是目录，拒绝访问")
+    entries = list(out_dir.iterdir())
+    if not entries:
+        return
+    exact_input = resolved == INPUT_DIR.resolve(strict=False)
+    if exact_input and all(entry.name == ".gitkeep" and entry.is_file() and not entry.is_symlink()
+                           for entry in entries):
+        return
+    state = imported_path(out_dir)
+    valid_state = state.exists() and _is_valid_imported_state(state)
+    for entry in entries:
+        if entry.name == ".gitkeep":
+            if entry.is_symlink() or not entry.is_file():
+                raise ImportError_("输出根目录不是导入器目录，拒绝访问")
+            continue
+        if entry.name == ".imported.json":
+            if entry.is_symlink() or not entry.is_file():
+                raise ImportError_("输出根目录不是导入器目录，拒绝访问")
+            continue
+        if entry.is_symlink():
+            raise ImportError_("输出根目录包含符号链接，拒绝访问")
+        if not entry.is_file() or entry.suffix != ".md":
+            raise ImportError_("输出根目录不是导入器目录，拒绝访问")
+        # State presence never grants ownership of arbitrary Markdown.  Each
+        # Markdown file must carry the independently verifiable managed shape.
+        if not _is_managed_markdown(entry):
+            raise ImportError_("输出根目录不是导入器目录，拒绝访问")
+    if valid_state or (allow_invalid_state and state.exists() and state.is_file() and not state.is_symlink()):
+        return
+    if all(entry.name == ".gitkeep" or _is_managed_markdown(entry) for entry in entries):
+        return
+    raise ImportError_("输出根目录不是导入器目录，拒绝访问")
+
+
+def _assert_output_root_path_safety(out_dir: Path) -> None:
+    """Check path-level hazards without scanning the output directory."""
     if out_dir.is_symlink():
         raise ImportError_("输出根目录是符号链接，拒绝访问")
     absolute = out_dir.absolute()
@@ -1263,34 +1354,20 @@ def _assert_safe_output_root(out_dir: Path) -> None:
         raise ImportError_("状态文件是符号链接，拒绝访问")
 
 
+def _assert_safe_output_root(out_dir: Path, allow_invalid_state: bool = False) -> None:
+    _assert_output_root_path_safety(out_dir)
+    _assert_output_root_ownership(out_dir, allow_invalid_state)
+
+
 def load_imported(out_dir: Path) -> dict:
-    _assert_safe_output_root(out_dir)
+    _assert_safe_output_root(out_dir, allow_invalid_state=True)
     p = imported_path(out_dir)
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             raise ImportError_("状态文件损坏或 UTF-8 解码失败，未修改")
-        if not isinstance(data, dict):
-            raise ImportError_("状态文件结构损坏，未修改（期望 JSON 对象）")
-        for key, entry in data.items():
-            if not isinstance(key, str) or ":" not in key:
-                raise ImportError_("状态文件结构损坏，未修改（会话键无效）")
-            state_source, state_cid = key.split(":", 1)
-            if not state_source or not state_cid:
-                raise ImportError_("状态文件结构损坏，未修改（会话键无效）")
-            if not isinstance(entry, dict):
-                raise ImportError_("状态文件结构损坏，未修改（会话记录不是对象）")
-            path = entry.get("path")
-            imported_at = entry.get("imported_at")
-            title = entry.get("title")
-            message_ids = entry.get("message_ids")
-            if (not isinstance(path, str) or not path or not isinstance(imported_at, str)
-                    or not isinstance(title, str) or not isinstance(message_ids, list)
-                    or any(not isinstance(mid, str) or not mid for mid in message_ids)
-                    or len(message_ids) != len(set(message_ids))):
-                raise ImportError_("状态文件结构损坏，未修改（会话字段无效）")
-        return data
+        return _validate_imported_state(data)
     return {}
 
 
@@ -1372,10 +1449,14 @@ def _claim_dry_run_output(conv: tuple, imported: dict, out_dir: Path) -> None:
     imported[f"{source}:{cid}"] = _state_entry(path, title, msgs)
 
 
-def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool = False) -> str:
+def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool = False,
+                       *, _batch_prevalidated: bool = False) -> str:
     """Markdown is the source of truth; state is reconstructed from its final block."""
     source, cid, title, exported_at, msgs = conv
-    _assert_safe_output_root(out_dir)
+    if _batch_prevalidated:
+        _assert_output_root_path_safety(out_dir)
+    else:
+        _assert_safe_output_root(out_dir)
     key = f"{source}:{cid}"
     ids = [m[2] for m in msgs]
     if len(ids) != len(set(ids)):
@@ -1438,6 +1519,8 @@ def discover_local(since: Optional[str] = None, excludes: tuple = (), roots: tup
             except OSError:
                 continue
             if size == 0:
+                if failures is not None:
+                    failures.append(("—", SKIP_EMPTY))
                 continue
             try:
                 first_t, last_t, title = _peek(source, p)
@@ -1554,6 +1637,9 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
                  out_dir: Path, dry_run: bool) -> tuple:
     new = updated = dup = 0
     seen_keys: set[str] = set()
+    # Validate the complete root once for this batch.  Individual writes keep
+    # path/target checks, while save_imported performs a final full recheck.
+    _assert_safe_output_root(out_dir)
     if total == 0 and not convs and not skipped:
         skipped.append(("导出文件", SKIP_EMPTY))
     for conv in convs:
@@ -1563,7 +1649,8 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
             continue
         seen_keys.add(key)
         try:
-            result = write_conversation(conv, imported, out_dir, dry_run)
+            result = write_conversation(conv, imported, out_dir, dry_run,
+                                        _batch_prevalidated=True)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
             detail = str(e) if isinstance(e, ImportError_) else "输出写入失败"
             skipped.append(("—", f"写入失败：{detail}"))
@@ -1592,6 +1679,9 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
         print(f"  [{source}] {title or sid}  {first_t or '?'} ~ {last_t or '?'}  {size}B  {path}")
     if args.dry_run:
         print("（--dry-run：完整解析和对账，未写入任何文件）")
+    # This is deliberately before confirmation and is read-only: dry-runs and
+    # cancelled batches validate the same root without adopting or chmodding it.
+    _assert_safe_output_root(out_dir)
     if not args.dry_run and not args.yes:
         try:
             ans = input(f"\n确认导入以上 {len(found)} 个会话？[y/N] ").strip().lower()
@@ -1621,7 +1711,8 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
             continue
         seen_keys.add(key)
         try:
-            result = write_conversation(convs[0], imported, out_dir, args.dry_run)
+            result = write_conversation(convs[0], imported, out_dir, args.dry_run,
+                                        _batch_prevalidated=True)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
             detail = str(e) if isinstance(e, ImportError_) else "输出写入失败"
             bad.append(("—", f"写入失败：{detail}"))
