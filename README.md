@@ -58,12 +58,12 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude
 
 ### 使用者要做的
 
-1. 按 [导入来源](#导入来源) 在对应 AI 工具里导出聊天记录，把导出文件放进仓库的 `input/` 目录（该目录已被 Git 忽略，不会提交）。
+1. 按 [导入来源](#导入来源) 在对应 AI 工具里导出聊天记录；原始导出放在仓库外的本机目录（不要放进 `input/`），运行 `python3 import_chats.py --source <来源> --path <原始导出路径>`，由导入器把统一 Markdown 写入 `input/`。
 2. 把这个仓库交给你正在使用的 AI（例如 Codex、Claude Code、Hermes 或 DeepSeek Harness），然后直接告诉它：
 
    ```text
    请接手这个 selfdistill 项目：
-   1. 按 docs/intake.md 整理我提供的聊天记录，原始记录只放在 input/，不要提交到 Git；
+   1. 按 docs/intake.md 整理我提供的聊天记录：原始导出留在仓库外本机目录，不要提交到 Git；只把统一 Markdown 放进 input/；
    2. 按 prompts/distill.md 从头读完材料，先报告阅读边界，再提出 L1–L4 候选；
    3. L3 和个人/敏感/高风险/冲突内容逐条给我确认；只有可见、可撤回的低风险通用规则可免逐条确认；
    4. 不要直接写 canonical/、L4 或简历。等我处理候选后，先展示完整 aggregate diff，再等我明确确认才写入；
@@ -76,7 +76,7 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude
 
 ### AI 要做的
 
-1. 阅读 `docs/intake.md`，把使用者导出的记录整理成统一 Markdown，放进已被 Git 忽略的 `input/`。
+1. 阅读 `docs/intake.md`；原始导出保留在仓库外本机目录，通过 `import_chats.py --path <原始导出路径>` 整理成统一 Markdown 写入已被 Git 忽略的 `input/`。
 2. 按 `prompts/distill.md` 提炼 L1–L4 候选；先展示来源和候选，不直接改正式档案。
 3. 只在用户已处理候选、并明确确认了最终 aggregate diff 后，才增量写入 `canonical/`（结构参考 `templates/`，仓库里的「张三」是虚构样例）。
 4. 运行 `python3 build.py`，生成 `dist/index.html`、L1–L4 报告以及 `dist/codex/`、`dist/hermes/`、`dist/dsh/`。
@@ -92,12 +92,27 @@ L3 始终逐条确认；L1/L2/L4 中描述个人的内容，以及敏感、高�
 
 ## 导入来源
 
-| 来源 | 导出入口速查 | 整理细则 |
+**自动导入器**（推荐）：导出文件直接交给 `import_chats.py`，本地会话自动发现（先 dry-run 清单、确认后写入）：
+
+```bash
+python3 import_chats.py --source chatgpt  --path <导出目录>
+python3 import_chats.py --source gemini   --path <Takeout 解压目录>
+python3 import_chats.py --source deepseek --path <conversations.json 或 zip>
+python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--dry-run]
+# local --path 指向混合 JSONL 目录时：
+python3 import_chats.py --source local --path <目录> --local-format auto|codex|claude --dry-run
+```
+
+导入器会把 Gemini 的每次 `Prompted` 活动单独输出；ChatGPT 在 `current_node` 有效时只保留活动路径，只有字段缺失或为 `null` 时才会保留并拆分已验证的根到叶分支；字段存在但格式非法或所指节点不存在会拒绝并报告。DeepSeek 的分支会拆成独立会话，而不是拼成假对话。图片和授权附件只保留可读占位，模型思考、工具过程与已知本机内部注入不会进入 Markdown。`--dry-run` 会完整解析并显示预计新导入、更新、重复和失败数，但不会创建文件。退出码 `0` 表示成功（含预期内部内容排除），`2` 表示部分成功，`1` 表示全部失败或致命错误。
+
+| 来源 | 导出入口速查 | 自动导入 |
 |------|--------------|----------|
-| ChatGPT 网页 | 左下角头像 → 设置 → **数据管理** → 导出数据；解压后得到 `conversations-*.json` → 放入 `input/` | [docs/intake.md](docs/intake.md) |
-| Gemini 网页 | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` → 按会话整理入 `input/` | [docs/intake.md](docs/intake.md) |
-| DeepSeek 网页 | 左下角头像 → **系统设置** → **数据管理** → **导出所有历史对话** → 按会话整理入 `input/` | [docs/intake.md](docs/intake.md) |
-| 本机 Codex / Claude Code | 记录保存在本机目录；交给正在使用的 AI 协助整理成统一格式 → 放入 `input/` | [docs/intake.md](docs/intake.md) |
+| ChatGPT 网页 | 左下角头像 → 设置 → **数据管理** → 导出数据；解压后得到 `conversations-*.json` | `--source chatgpt` |
+| Gemini 网页 ⚗️ | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` | `--source gemini`（每个 Prompted 活动一份会话；活动容器不可靠时停止并改用手工整理） |
+| DeepSeek 网页 | 左下角头像 → **系统设置** → **数据管理** → **导出所有历史对话** | `--source deepseek` |
+| 本机 Codex / Claude Code | 会话保存在 `~/.codex/sessions`、`~/.claude/projects` | `--source local`（自动发现） |
+
+详细格式与手工整理 fallback 见 [docs/intake.md](docs/intake.md)。
 
 ## 产出与写回目标
 

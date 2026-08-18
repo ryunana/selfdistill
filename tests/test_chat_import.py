@@ -1,0 +1,3274 @@
+from __future__ import annotations
+
+import json
+import os
+import io
+import copy
+import subprocess
+import sys
+import tempfile
+import unittest
+import unittest.mock
+import zipfile
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+import import_chats as ic  # noqa: E402
+
+FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "chat-import"
+
+
+def run_import(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "import_chats.py", *args],
+                          capture_output=True, text=True, cwd=str(PROJECT_ROOT))
+
+
+class ParserTests(unittest.TestCase):
+    def test_path_helper_rejects_cycles_and_parent_child_mismatch(self) -> None:
+        with self.assertRaises(ic.ImportError_):
+            ic._root_to_leaf_paths({
+                "a": {"parent": "b", "children": ["b"]},
+                "b": {"parent": "a", "children": ["a"]},
+            })
+        with self.assertRaises(ic.ImportError_):
+            ic._root_to_leaf_paths({
+                "root": {"parent": None, "children": ["a"]},
+                "a": {"parent": None, "children": []},
+            })
+        with self.assertRaises(ic.ImportError_):
+            ic._root_to_leaf_paths({
+                "root": {"parent": None, "children": []},
+                "a": {"parent": "root", "children": []},
+            })
+
+    def test_path_helper_rejects_falsey_children_duplicates_and_multiple_roots(self) -> None:
+        invalid_mappings = [
+            {"root": {"parent": None, "children": value}}
+            for value in (0, False, "", {})
+        ] + [
+            {"root": {"parent": None, "children": ["child", "child"]},
+             "child": {"parent": "root", "children": []}},
+            {"root": {"parent": None, "children": []},
+             "other": {"parent": None, "children": []}},
+        ]
+        for mapping in invalid_mappings:
+            with self.assertRaises(ic.ImportError_):
+                ic._root_to_leaf_paths(mapping)
+
+    def test_path_helper_derives_absent_or_null_children_but_checks_explicit_lists(self) -> None:
+        derived = {
+            "root": {"parent": None},
+            "middle": {"parent": "root", "children": None},
+            "leaf": {"parent": "middle"},
+        }
+        self.assertEqual(ic._root_to_leaf_paths(derived), [["root", "middle", "leaf"]])
+        explicit = {
+            "root": {"parent": None, "children": ["middle"]},
+            "middle": {"parent": "root", "children": ["leaf"]},
+            "leaf": {"parent": "middle", "children": []},
+        }
+        self.assertEqual(ic._root_to_leaf_paths(explicit), [["root", "middle", "leaf"]])
+        for invalid in (
+            {"root": {"parent": None, "children": []}, "leaf": {"parent": "root"}},
+            {"root": {"parent": None, "children": ["missing"]}},
+            {"root": {"parent": None, "children": ["leaf", "leaf"]},
+             "leaf": {"parent": "root", "children": []}},
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ic.ImportError_):
+                    ic._root_to_leaf_paths(invalid)
+
+    def test_path_helper_parent_validation_is_linear_for_long_chain_and_cycles(self) -> None:
+        count = 8000
+        parent_reads = {"count": 0}
+
+        class CountingNode(dict):
+            def get(self, key, default=None):
+                if key == "parent":
+                    parent_reads["count"] += 1
+                return super().get(key, default)
+
+        chain = {
+            str(i): CountingNode({"parent": None if i == 0 else str(i - 1)})
+            for i in range(count)
+        }
+        paths = ic._root_to_leaf_paths(chain)
+        self.assertEqual(paths, [[str(i) for i in range(count)]])
+        # Roots, derived children, coloring, and the returned path each need
+        # one parent lookup per node; a quadratic ancestry walk exceeds this.
+        self.assertLess(parent_reads["count"], count * 6)
+
+        cycle_size = 4000
+        cycle = {"root": {"parent": None}}
+        cycle.update({
+            f"cycle-{i}": {"parent": f"cycle-{(i - 1) % cycle_size}"}
+            for i in range(cycle_size)
+        })
+        with self.assertRaisesRegex(ic.ImportError_, "会话 mapping 存在循环"):
+            ic._root_to_leaf_paths(cycle)
+
+    def test_graph_references_reject_nested_bool_and_blank_values(self) -> None:
+        valid_numeric = {
+            "1": {"parent": None, "children": [2]},
+            "2": {"parent": 1, "children": []},
+        }
+        self.assertEqual(ic._root_to_leaf_paths(valid_numeric), [["1", "2"]])
+        invalid_mappings = [
+            {1: {"parent": None}},
+            {"": {"parent": None}},
+            {"root": {"parent": []}},
+            {"root": {"parent": {"nested": "value"}}},
+            {"root": {"parent": True}},
+            {"root": {"parent": ""}},
+            {"root": {"parent": None, "children": [[]]}},
+            {"root": {"parent": None, "children": [{"nested": "value"}]}},
+            {"root": {"parent": None, "children": [True]}},
+            {"root": {"parent": None, "children": [""]}},
+        ]
+        for mapping in invalid_mappings:
+            with self.subTest(mapping=mapping):
+                with self.assertRaisesRegex(ic.ImportError_, "会话 mapping"):
+                    ic._root_to_leaf_paths(mapping)
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            base = {"id": "safe", "mapping": {
+                "root": {"parent": None, "children": ["message"]},
+                "message": {"parent": "root", "children": [], "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["visible"]}}},
+            }}
+            for malformed_current in ({"secret": "nested"}, ["nested"], True, ""):
+                with self.subTest(current=type(malformed_current).__name__):
+                    record = dict(base, current_node=malformed_current)
+                    p.write_text(json.dumps([record]), encoding="utf-8")
+                    convs, skipped, _total = ic.parse_chatgpt(p)
+                    self.assertEqual(convs, [])
+                    self.assertEqual([reason for _ref, reason in skipped], ["ChatGPT current_node 引用无效"])
+                    report = io.StringIO()
+                    with redirect_stdout(report):
+                        ic.print_report(1, 0, 0, 0, 0, skipped, "chatgpt", False)
+                    self.assertNotIn("secret", report.getvalue())
+
+    def test_graph_references_reject_nonfinite_floats_without_leaking(self) -> None:
+        for nonfinite in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(location="parent", value=repr(nonfinite)):
+                mapping = {
+                    "root": {"parent": None, "children": ["child"]},
+                    "child": {"parent": nonfinite, "children": []},
+                }
+                with self.assertRaisesRegex(ic.ImportError_, "会话 mapping 引用无效"):
+                    ic._root_to_leaf_paths(mapping)
+            with self.subTest(location="children", value=repr(nonfinite)):
+                mapping = {"root": {"parent": None, "children": [nonfinite]}}
+                with self.assertRaisesRegex(ic.ImportError_, "会话 mapping 引用无效"):
+                    ic._root_to_leaf_paths(mapping)
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            mapping = {
+                "root": {"parent": None, "children": ["message"]},
+                "message": {"parent": "root", "children": [], "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["visible"]}}},
+            }
+            for nonfinite in (float("nan"), float("inf"), -float("inf")):
+                with self.subTest(location="current_node", value=repr(nonfinite)):
+                    p.write_text(json.dumps([{
+                        "id": "safe", "title": "private-title", "mapping": mapping,
+                        "current_node": nonfinite,
+                    }]), encoding="utf-8")
+                    convs, skipped, _total = ic.parse_chatgpt(p)
+                    self.assertEqual(convs, [])
+                    self.assertEqual(
+                        [reason for _ref, reason in skipped],
+                        ["ChatGPT current_node 引用无效"],
+                    )
+                    report = io.StringIO()
+                    with redirect_stdout(report):
+                        ic.print_report(1, 0, 0, 0, 0, skipped, "chatgpt", False)
+                    self.assertNotIn("private-title", report.getvalue())
+
+    def test_chatgpt_valid_current_comb_does_not_materialize_fallback_paths(self) -> None:
+        depth = 2000
+        mapping = {"root": {"parent": None}}
+        parent = "root"
+        for i in range(depth):
+            node_id = f"main-{i}"
+            mapping[node_id] = {"parent": parent}
+            mapping[f"regen-{i}"] = {"parent": node_id}
+            parent = node_id
+        mapping[parent]["message"] = {"author": {"role": "user"}, "content": {"parts": ["active"]}}
+        record = {"id": "comb", "current_node": parent, "mapping": mapping}
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([record]), encoding="utf-8")
+            with unittest.mock.patch.object(ic, "_materialize_root_to_leaf_paths",
+                                            wraps=ic._materialize_root_to_leaf_paths) as materialize:
+                convs, skipped, _total = ic.parse_chatgpt(p)
+        self.assertEqual(materialize.call_count, 0)
+        self.assertEqual(skipped, [])
+        self.assertEqual(len(convs), 1)
+        self.assertEqual([m[3] for m in convs[0][4]], ["active"])
+
+    def test_chatgpt_current_node_uses_parent_derived_children(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([{"id": "derived", "current_node": "active", "mapping": {
+                "root": {"parent": None},
+                "active": {"parent": "root", "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["active only"]}}},
+                "inactive": {"parent": "root", "children": None, "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["inactive"]}}},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual(skipped, [])
+            self.assertEqual(len(convs), 1)
+            self.assertEqual([message[3] for message in convs[0][4]], ["active only"])
+
+    def test_fallback_parsers_reject_invalid_tree_shapes(self) -> None:
+        def mapping(kind: str, message: dict) -> dict:
+            if kind == "falsey":
+                return {"root": {"parent": None, "children": 0, "message": message}}
+            if kind == "duplicate":
+                return {
+                    "root": {"parent": None, "children": ["child", "child"], "message": message},
+                    "child": {"parent": "root", "children": [], "message": message},
+                }
+            return {
+                "root": {"parent": None, "children": [], "message": message},
+                "other": {"parent": None, "children": [], "message": message},
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            chatgpt = root / "conversations-000.json"
+            deepseek = root / "conversations.json"
+            chat_message = {"author": {"role": "user"}, "content": {"parts": ["visible"]}}
+            deep_message = {"fragments": [{"type": "REQUEST", "content": "visible"}]}
+            for kind in ("falsey", "duplicate", "roots"):
+                chatgpt.write_text(json.dumps([{"id": "safe", "current_node": "missing",
+                                                 "mapping": mapping(kind, chat_message)}]), encoding="utf-8")
+                convs, skipped, _total = ic.parse_chatgpt(chatgpt)
+                self.assertEqual(convs, [])
+                self.assertIn("会话 mapping 结构损坏", [reason for _ref, reason in skipped])
+
+                deepseek.write_text(json.dumps([{"id": "safe", "mapping": mapping(kind, deep_message)}]),
+                                    encoding="utf-8")
+                convs, skipped, _total = ic.parse_deepseek(deepseek)
+                self.assertEqual(convs, [])
+                self.assertIn("会话 mapping 结构损坏", [reason for _ref, reason in skipped])
+
+    def test_chatgpt_missing_current_node_splits_leaf_paths_and_redacts_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            conv = {"id": "cg", "title": "分支", "mapping": {
+                "root": {"id": "root", "parent": None, "children": ["u"]},
+                "u": {"id": "u", "parent": "root", "children": ["a", "b"], "message": {
+                    "id": "u", "author": {"role": "user"}, "create_time": 1,
+                    "content": {"parts": ["正文", {"asset_pointer": "private://asset", "width": 9}, {"opaque": "no"}]}}},
+                "a": {"id": "a", "parent": "u", "children": [], "message": {"id": "a", "author": {"role": "assistant"}, "create_time": 2, "content": {"parts": ["A"]}}},
+                "b": {"id": "b", "parent": "u", "children": [], "message": {"id": "b", "author": {"role": "assistant"}, "create_time": 3, "content": {"parts": ["B"]}}},
+            }}
+            p.write_text(json.dumps([conv], ensure_ascii=False), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual(len(convs), 2)
+            self.assertEqual(len({c[1] for c in convs}), 2)
+            self.assertIn("cg", {c[1] for c in convs})
+            self.assertTrue(any(c[1].startswith("cg--branch-") for c in convs))
+            user_text = convs[0][4][0][3]
+            self.assertIn("[图片]", user_text)
+            self.assertIn("[未识别附件]", user_text)
+            self.assertNotIn("asset_pointer", user_text)
+            self.assertNotIn("{'", user_text)
+            reasons = [reason for _ref, reason in skipped if "未识别 ChatGPT 附件" in reason]
+            self.assertTrue(reasons)
+            self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
+
+    def test_chatgpt_branch_excluded(self) -> None:
+        convs, skipped, total = ic.parse_chatgpt(FIXTURE / "chatgpt")
+        self.assertEqual(total, 1)
+        self.assertEqual(len(convs), 1)
+        _src, cid, title, _exp, msgs = convs[0]
+        self.assertEqual((cid, title), ("chatgpt-conv-001", "虚构聊天：咖啡豆选择"))
+        self.assertEqual(len(msgs), 3)  # m1/m2/m3；重写分支 m3b 被忽略
+        self.assertIn("手冲咖啡", msgs[0][3])
+        self.assertIn("滤杯", msgs[2][3])
+        self.assertFalse(any("重写分支" in m[3] for m in msgs))
+
+    def test_chatgpt_current_node_still_requires_complete_validated_graph(self) -> None:
+        def visible(role: str, text: str) -> dict:
+            return {"author": {"role": role}, "content": {"parts": [text]}}
+
+        def rejected_mapping(kind: str) -> dict:
+            if kind == "duplicate children":
+                return {"root": {"parent": None, "children": ["active", "active"]},
+                        "active": {"parent": "root", "children": [], "message": visible("user", "active")}}
+            if kind == "parent mismatch":
+                return {"root": {"parent": None, "children": []},
+                        "active": {"parent": "root", "children": [], "message": visible("user", "active")}}
+            if kind == "multiple roots":
+                return {"root": {"parent": None, "children": ["active"]},
+                        "active": {"parent": "root", "children": [], "message": visible("user", "active")},
+                        "other": {"parent": None, "children": []}}
+            if kind == "cycle":
+                return {"active": {"parent": None, "children": [], "message": visible("user", "active")},
+                        "loop-a": {"parent": "loop-b", "children": ["loop-b"]},
+                        "loop-b": {"parent": "loop-a", "children": ["loop-a"]}}
+            return {"root": {"parent": None, "children": ["active"]},
+                    "active": {"parent": "root", "children": [], "message": visible("user", "active")},
+                    "orphan": {"parent": "missing", "children": []}}
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            for kind in ("duplicate children", "parent mismatch", "multiple roots", "cycle", "disconnected"):
+                with self.subTest(kind=kind):
+                    p.write_text(json.dumps([{"id": "safe", "current_node": "active",
+                                                "mapping": rejected_mapping(kind)}]), encoding="utf-8")
+                    convs, skipped, _total = ic.parse_chatgpt(p)
+                    self.assertEqual(convs, [])
+                    self.assertIn("会话 mapping 结构损坏", [reason for _ref, reason in skipped])
+
+            p.write_text(json.dumps([{"id": "safe", "current_node": "active", "mapping": {
+                "root": {"parent": None, "children": ["active", "inactive"]},
+                "active": {"parent": "root", "children": [], "message": visible("user", "active only")},
+                "inactive": {"parent": "root", "children": [], "message": visible("user", "inactive sibling")},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual(skipped, [])
+            self.assertEqual(len(convs), 1)
+            self.assertEqual([message[3] for message in convs[0][4]], ["active only"])
+
+    def test_chatgpt_outer_reasoning_content_is_excluded_even_with_text_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            data = [{"id": "reasoning", "title": "x", "current_node": "a", "mapping": {
+                "root": {"parent": None, "children": ["r"]},
+                "r": {"parent": "root", "children": ["a"], "message": {
+                    "id": "r", "author": {"role": "assistant"},
+                    "content": {"content_type": "reasoning", "parts": ["不得泄漏的推理"]}}},
+                "a": {"parent": "r", "children": [], "message": {
+                    "id": "a", "author": {"role": "assistant"},
+                    "content": {"parts": ["可见回答"]}}},
+            }}]
+            p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual([m[3] for m in convs[0][4]], ["可见回答"])
+            self.assertTrue(any(reason.startswith("内部内容已排除：ChatGPT reasoning")
+                                for _ref, reason in skipped))
+
+    def test_reasoning_only_chatgpt_keeps_exclusion_and_records_no_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([{"id": "reasoning-only", "current_node": "n", "mapping": {
+                "n": {"parent": None, "children": [], "message": {
+                    "author": {"role": "assistant"},
+                    "content": {"content_type": "reasoning", "parts": ["internal"]}}},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            reasons = [reason for _ref, reason in skipped]
+            self.assertEqual(convs, [])
+            self.assertEqual(reasons.count(ic.SKIP_EMPTY), 1)
+            self.assertEqual(reasons.count("内部内容已排除：ChatGPT reasoning 1 个"), 1)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(1, 0, 0, 0, 0, skipped, "chatgpt", False)
+            self.assertIn("预期内部内容排除 1 个片段", stream.getvalue())
+            self.assertIn("解析/写入失败 1：无消息", stream.getvalue())
+
+    def test_gemini_container_classes_are_exact_tokens_and_allow_valueless_attrs(self) -> None:
+        parser = ic._GeminiActivityExtractor()
+        parser.feed("<div class='not-outer-cell'><div>忽略</div></div><div class><div>也忽略</div></div>")
+        self.assertEqual(parser.blocks, [])
+
+    def test_chatgpt_empty_conversation_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([{"id": "x", "title": "空会话", "mapping": {"root": {"id": "root", "message": None}}}]),
+                         encoding="utf-8")
+            convs, skipped, total = ic.parse_chatgpt(p)
+            self.assertEqual(convs, [])
+            self.assertEqual(total, 1)
+            self.assertEqual(skipped[0][1], ic.SKIP_EMPTY)
+
+    def test_deepseek_thinking_default_excluded(self) -> None:
+        ic._INCLUDE_THINKING = False
+        try:
+            convs, skipped, total = ic.parse_deepseek(FIXTURE / "deepseek" / "conversations.json")
+            self.assertEqual(total, 1)
+            self.assertEqual(len(convs), 1)
+            msgs = convs[0][4]
+            self.assertNotIn("<!-- thinking -->", msgs[1][3])
+            self.assertIn("[附件: trail-map.png]", msgs[1][3])
+        finally:
+            ic._INCLUDE_THINKING = False
+
+    def test_deepseek_thinking_with_flag(self) -> None:
+        ic._INCLUDE_THINKING = True
+        try:
+            convs, _s, _t = ic.parse_deepseek(FIXTURE / "deepseek" / "conversations.json")
+            self.assertIn("<!-- thinking -->", convs[0][4][1][3])
+        finally:
+            ic._INCLUDE_THINKING = False
+
+    def test_deepseek_tool_fragments_aggregated(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations.json"
+            data = [{"id": "c1", "title": "带搜索", "mapping": {
+                "1": {"id": "1", "message": {"inserted_at": "2026-08-01T09:00:00+08:00",
+                                             "fragments": [{"type": "REQUEST", "content": "你好"}]}, "parent": None, "children": ["2"]},
+                "2": {"id": "2", "message": {"inserted_at": "2026-08-01T09:00:01+08:00",
+                                             "fragments": [{"type": "TOOL_SEARCH"}, {"type": "SEARCH", "content": "结果"}]}, "parent": "1", "children": []},
+            }}]
+            p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            convs, skipped, total = ic.parse_deepseek(p)
+            self.assertEqual(len(convs), 1)
+            self.assertIn("工具片段 2 条", skipped[0][1])
+
+    def test_deepseek_mixed_visible_roles_in_one_node_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations.json"
+            p.write_text(json.dumps([{"id": "mixed", "mapping": {
+                "m": {"parent": None, "children": [], "message": {"fragments": [
+                    {"type": "REQUEST", "content": "user text"},
+                    {"type": "RESPONSE", "content": "assistant text"},
+                ]}},
+            }}]), encoding="utf-8")
+            convs, skipped, total = ic.parse_deepseek(p)
+            self.assertEqual((total, convs), (1, []))
+            reasons = [reason for _ref, reason in skipped if "混合 REQUEST/RESPONSE" in reason]
+            self.assertTrue(reasons)
+            self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
+
+    def test_deepseek_empty_opposite_role_never_overwrites_visible_role(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations.json"
+            for fragments, expected_role in (
+                ([{"type": "REQUEST", "content": "visible request"},
+                  {"type": "RESPONSE", "content": "  "},
+                  {"type": "FILE", "files": [{"file_name": "request.txt"}]}], "user"),
+                ([{"type": "RESPONSE", "content": "visible response"},
+                  {"type": "REQUEST", "content": ""},
+                  {"type": "FILE", "files": [{"file_name": "response.txt"}]}], "assistant"),
+            ):
+                with self.subTest(expected_role=expected_role):
+                    p.write_text(json.dumps([{"id": "roles", "mapping": {
+                        "m": {"parent": None, "children": [], "message": {"fragments": fragments}},
+                    }}]), encoding="utf-8")
+                    convs, skipped, total = ic.parse_deepseek(p)
+                    self.assertEqual((total, len(convs)), (1, 1))
+                    self.assertEqual(convs[0][4][0][0], expected_role)
+                    self.assertIn("[附件:", convs[0][4][0][3])
+                    self.assertFalse(skipped)
+
+    def test_deepseek_nested_file_metadata_is_not_stringified(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations.json"
+            p.write_text(json.dumps([{"id": "x", "mapping": {"n": {"parent": None, "children": [], "message": {
+                "fragments": [{"type": "REQUEST", "content": "q"}, {"type": "FILE", "files": [{"file_name": {"secret": 1}}]}]}}}}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_deepseek(p)
+            self.assertEqual(convs, [])
+            reasons = [reason for _ref, reason in skipped if "附件元数据结构损坏" in reason]
+            self.assertTrue(reasons)
+            self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
+
+    def test_deepseek_branches_are_separate_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations.json"
+            data = [{"id": "d", "title": "分支", "mapping": {
+                "root": {"id": "root", "parent": None, "children": ["u"], "message": None},
+                "u": {"id": "u", "parent": "root", "children": ["a", "tool"], "message": {"fragments": [{"type": "REQUEST", "content": "问题"}]}},
+                "a": {"id": "a", "parent": "u", "children": [], "message": {"fragments": [{"type": "RESPONSE", "content": "回答 A"}]}},
+                "tool": {"id": "tool", "parent": "u", "children": ["b"], "message": {"fragments": [{"type": "TOOL_SEARCH", "content": "x"}]}},
+                "b": {"id": "b", "parent": "tool", "children": [], "message": {"fragments": [{"type": "RESPONSE", "content": "回答 B"}]}},
+            }}]
+            p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            convs, _skipped, _total = ic.parse_deepseek(p)
+            self.assertEqual(len(convs), 2)
+            bodies = ["\n".join(m[3] for m in c[4]) for c in convs]
+            self.assertTrue(any("回答 A" in b and "回答 B" not in b for b in bodies))
+            self.assertTrue(any("回答 B" in b and "回答 A" not in b for b in bodies))
+            self.assertIn("d", {c[1] for c in convs})
+            self.assertTrue(any("--branch-" in c[1] for c in convs))
+
+    def test_codex_cleans_system_blocks(self) -> None:
+        convs = ic.parse_codex(FIXTURE / "codex" / "sessions" / "2026" / "08" / "01"
+                               / "rollout-2026-08-01T10-00-00-fake-session-001.jsonl")
+        self.assertIsNotNone(convs)
+        _src, cid, title, _exp, msgs = convs[0]
+        self.assertEqual(cid, "fake-session-001")
+        self.assertTrue(title)
+        self.assertIn("帮我写个 Python 脚本", msgs[0][3])
+        # A one-field fixture is not a proven system envelope and must survive.
+        self.assertIn("environment_context", msgs[0][3])
+        self.assertEqual(msgs[0][2], "u1")  # 真实 payload id 保留
+
+    def test_codex_adversarial_cleaning(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rollout-x.jsonl"
+            lines = [
+                '{"timestamp": "2026-08-01T10:00:00Z", "type": "session_meta", "payload": {"id": "adv"}}',
+                '{"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u1", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for /\n<INSTRUCTIONS>平台规则</INSTRUCTIONS><environment_context><cwd>/x</cwd><shell>zsh</shell></environment_context>"}]}}',
+                '{"timestamp": "2026-08-01T10:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u2", "content": [{"type": "input_text", "text": "Automation: Personal context daily observer\n<root>...</root>"}]}}',
+                '{"timestamp": "2026-08-01T10:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u3", "content": [{"type": "input_text", "text": "<image name=[Image #1] path=/tmp/a.png></image>真的用户提问"}]}}',
+                '{"timestamp": "2026-08-01T10:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "id": "a1", "content": [{"type": "output_text", "text": "回答"}]}}',
+            ]
+            p.write_text("\n".join(lines), encoding="utf-8")
+            convs = ic.parse_codex(p)
+            self.assertIsNotNone(convs)
+            msgs = convs[0][4]
+            texts = [m[3] for m in msgs if m[0] == "user"]
+            self.assertEqual(len(texts), 1)  # u1 被清空、u2 Automation 被丢弃，仅 u3 保留
+            self.assertIn("真的用户提问", texts[0])
+            self.assertIn("[图片]", texts[0])
+
+    def test_codex_structured_images_are_safe_visible_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rollout-images.jsonl"
+            p.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "session_meta", "payload": {"id": "images"}},
+                {"timestamp": "2026-08-01T10:00:00Z", "type": "response_item", "payload": {
+                    "type": "message", "role": "user", "content": [
+                        {"type": "input_image", "image_url": "https://private.example/image", "data": "secret"},
+                    ]}},
+                {"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {
+                    "type": "message", "role": "assistant", "content": [
+                        {"type": "output_image", "source": {"data": "secret-output"}},
+                    ]}},
+            ]), encoding="utf-8")
+            events = []
+            convs = ic.parse_codex(p, events)
+            self.assertEqual([m[3] for m in convs[0][4]], ["[图片]", "[图片]"])
+            self.assertNotIn("private.example", "\n".join(m[3] for m in convs[0][4]))
+            self.assertEqual(events, ["内部内容已排除：Codex 已知顶层记录"])
+
+    def test_codex_empty_known_text_block_is_ignored_without_warning(self) -> None:
+        events = []
+        text = ic._codex_text_with_events([
+            {"type": "input_text", "text": "可见文字"},
+            {"type": "output_text", "text": ""},
+        ], events)
+        self.assertEqual(text, "可见文字")
+        self.assertEqual(events, [])
+
+    def test_codex_preserves_user_xml_but_removes_known_envelopes(self) -> None:
+        user = ("<name>Ada</name><path>/safe</path><string>keep</string><prompt>keep too</prompt>\n"
+                "<environment_context><cwd>/private</cwd></environment_context>\n"
+                "真实正文")
+        cleaned = ic._clean_codex_user(user)
+        self.assertIn("<name>Ada</name>", cleaned)
+        self.assertIn("<path>/safe</path>", cleaned)
+        self.assertIn("<string>keep</string>", cleaned)
+        self.assertIn("<prompt>keep too</prompt>", cleaned)
+        self.assertIn("<environment_context><cwd>/private</cwd></environment_context>", cleaned)
+        self.assertEqual(ic._clean_codex_user("<environment_context>literal code</environment_context>"),
+                         "<environment_context>literal code</environment_context>")
+        self.assertEqual(ic._clean_codex_user("<image>literal code</image>"),
+                         "<image>literal code</image>")
+
+    def test_codex_preserved_ambiguous_system_markers_are_reported_once(self) -> None:
+        secret = "private-ambiguous-wrapper"
+        ambiguous = (f"<environment_context>{secret}</environment_context>\n"
+                     "I mention # AGENTS.md instructions in a note.\n"
+                     "Automation: literal user prose\n"
+                     "# Files mentioned by the user: literal user prose")
+        events = []
+        self.assertEqual(ic._clean_codex_user(ambiguous, events), ambiguous)
+        self.assertEqual(events, ["Codex 疑似系统包装已保留待复核"])
+
+        generic_events = []
+        generic = "<name>Ada</name><path>/safe</path><string>keep</string><prompt>keep</prompt>"
+        self.assertEqual(ic._clean_codex_user(generic, generic_events), generic)
+        self.assertEqual(generic_events, [])
+
+        removed_events = []
+        self.assertEqual(ic._clean_codex_user(
+            "<environment_context><cwd>/work</cwd><shell>zsh</shell></environment_context>visible",
+            removed_events), "visible")
+        self.assertIn("内部内容已排除：Codex 系统包装", removed_events)
+        self.assertNotIn("Codex 疑似系统包装已保留待复核", removed_events)
+
+        report = io.StringIO()
+        with redirect_stdout(report):
+            ic.print_report(1, 1, 0, 0, 0,
+                            [("private-ref", event) for event in events], "local", False)
+        self.assertIn("Codex 疑似系统包装已保留待复核", report.getvalue())
+        self.assertNotIn(secret, report.getvalue())
+        self.assertNotIn("private-ref", report.getvalue())
+
+    def test_codex_repeated_leading_wrappers_and_prefix_records_are_dropped(self) -> None:
+        nested = ("<environment_context><cwd>/one</cwd><shell>zsh</shell></environment_context>\n"
+                  "# AGENTS.md instructions for /\n<INSTRUCTIONS>internal</INSTRUCTIONS>\n"
+                  "<recommended_plugins>available but not installed</recommended_plugins>\n"
+                  "<environment_context><cwd>/two</cwd><shell>zsh</shell></environment_context>")
+        self.assertEqual(ic._clean_codex_user(nested), "")
+        self.assertEqual(ic._clean_codex_user("# Files mentioned by the user:\n<path>/x</path>"), "")
+        self.assertEqual(ic._clean_codex_user("# In app browser:\n<url>http://x</url>"), "")
+        ordinary = "用户说：# Files mentioned by the user: 只是一个字符串"
+        self.assertEqual(ic._clean_codex_user(ordinary), ordinary)
+
+    def test_codex_unclosed_known_wrappers_are_excluded_but_generic_xml_survives(self) -> None:
+        events = []
+        self.assertEqual(ic._clean_codex_user("<environment_context><cwd>/private</cwd>\n<shell>zsh", events), "")
+        self.assertEqual(ic._clean_codex_user("# AGENTS.md instructions for /\n<INSTRUCTIONS>partial", events), "")
+        self.assertTrue(any("残留未闭合" in event for event in events))
+        self.assertEqual(ic._clean_codex_user("<name>Ada</name><path>/safe</path>"),
+                         "<name>Ada</name><path>/safe</path>")
+        self.assertEqual(ic._clean_codex_user("<imagery>keep</imagery><image-processing>x</image-processing>"),
+                         "<imagery>keep</imagery><image-processing>x</image-processing>")
+        self.assertIn("<environment_context>example</environment_context>",
+                      ic._clean_codex_user("真实代码\n<environment_context>example</environment_context>"))
+
+    def test_codex_real_wrapper_signatures_and_exact_image_placeholders(self) -> None:
+        self.assertEqual(ic._clean_codex_user(
+            "<environment_context><cwd>/work</cwd><shell>zsh</shell></environment_context>visible"), "visible")
+        self.assertEqual(ic._clean_codex_user(
+            "<environment_context><cwd>literal</cwd></environment_context>"),
+            "<environment_context><cwd>literal</cwd></environment_context>")
+        self.assertEqual(ic._clean_codex_user(
+            "<heartbeat><automation_id>x</automation_id><current_time_iso>now</current_time_iso>instructions</heartbeat>visible"),
+            "visible")
+        self.assertEqual(ic._clean_codex_user("<heartbeat>literal heartbeat</heartbeat>"),
+                         "<heartbeat>literal heartbeat</heartbeat>")
+        for tag, body in (
+            ("external_codex_apps_writing_block_edits_part_1_of_3", "block edit writing"),
+            ("external_codex_apps_writing_block_edits_part_2_of_3", "block edit writing mcp"),
+            ("external_codex_apps_writing_block_edits_part_3_of_3", "block edit writing"),
+        ):
+            with self.subTest(tag=tag):
+                self.assertEqual(ic._clean_codex_user(f"<{tag}>{body}</{tag}>visible"), "visible")
+        self.assertEqual(ic._clean_codex_user("<image name=[Image #7]></image>visible"), "[图片]visible")
+        self.assertEqual(ic._clean_codex_user("<image name=[Image #8] path=/tmp/x></image>visible"), "[图片]visible")
+        self.assertEqual(ic._clean_codex_user('<image name="demo" path="x">literal</image>'),
+                         '<image name="demo" path="x">literal</image>')
+
+    def test_codex_multiline_incomplete_wrappers_require_schema_evidence(self) -> None:
+        events = []
+        self.assertEqual(ic._clean_codex_user(
+            "<environment_context>\n<cwd>/work</cwd>\n<shell>zsh", events), "")
+        self.assertTrue(any("残留未闭合" in event for event in events))
+        self.assertEqual(ic._clean_codex_user("<environment_context>\n<cwd>literal</cwd>"),
+                         "<environment_context>\n<cwd>literal</cwd>")
+
+    def test_malformed_json_boundaries_are_reported_without_attribute_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            chatgpt = root / "conversations-000.json"
+            for bad_mapping in ([], {"n": {"message": {"content": {"parts": "not-a-list"}}}}):
+                chatgpt.write_text(json.dumps([{"id": "x", "mapping": bad_mapping}]), encoding="utf-8")
+                _convs, skipped, _total = ic.parse_chatgpt(chatgpt)
+                self.assertTrue(any("mapping" in reason or "消息结构" in reason for _ref, reason in skipped))
+            deepseek = root / "conversations.json"
+            for bad_mapping in ([], {"n": {"parent": None, "children": [], "message": {"fragments": ["bad"]}}},
+                                {"n": {"parent": None, "children": [], "message": {"fragments": [{"type": "FILE", "files": "bad"}]}}}):
+                deepseek.write_text(json.dumps([{"id": "x", "mapping": bad_mapping}]), encoding="utf-8")
+                _convs, skipped, _total = ic.parse_deepseek(deepseek)
+                self.assertTrue(any("结构损坏" in reason or "mapping" in reason for _ref, reason in skipped))
+            codex = root / "rollout-bad.jsonl"
+            codex.write_text("[]\n" + "\n".join(json.dumps({"type": "response_item", "payload": value})
+                                                     for value in ([], ["bad"])), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_codex(codex, events))
+            self.assertTrue(any("结构损坏" in event for event in events))
+            claude = root / "bad-claude.jsonl"
+            claude.write_text("[]\n" + "\n".join(json.dumps({"type": "user", "message": value})
+                                                      for value in ([], ["bad"])), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_claude(claude, events))
+            self.assertTrue(any("结构损坏" in event for event in events))
+            with self.assertRaises(ic.ImportError_):
+                ic._classify_local_file(codex, "auto")
+
+    def test_visible_text_types_and_deepseek_fragment_failures_are_not_rendered(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            deepseek = root / "conversations.json"
+            def export(fragments):
+                return [{"id": "bad", "mapping": {
+                    "root": {"parent": None, "children": ["m"]},
+                    "m": {"parent": "root", "children": [], "message": {"fragments": fragments}},
+                }}]
+            for fragments, needle in (
+                ([{"type": "REQUEST", "content": {"private": "object"}}], "REQUEST content 不是字符串"),
+                ([{"type": "FILE", "files": [{"file_name": {"private": "object"}}]}], "附件元数据结构损坏"),
+                ([{"type": "FUTURE_FRAGMENT", "content": "opaque"}], "未识别 DeepSeek 片段"),
+            ):
+                deepseek.write_text(json.dumps(export(fragments), ensure_ascii=False), encoding="utf-8")
+                convs, skipped, _total = ic.parse_deepseek(deepseek)
+                self.assertEqual(convs, [])
+                reasons = [reason for _ref, reason in skipped if needle in reason]
+                self.assertTrue(reasons)
+                self.assertTrue(all(not ic._is_expected_exclusion(reason) for reason in reasons))
+
+            codex = root / "rollout-types.jsonl"
+            codex.write_text(json.dumps({"type": "response_item", "payload": {
+                "type": "message", "role": "user", "content": [{"type": "input_text", "text": {"no": "render"}}],
+            }}), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_codex(codex, events))
+            self.assertTrue(any("text 不是字符串" in event and not ic._is_expected_exclusion(event) for event in events))
+
+            claude = root / "claude-types.jsonl"
+            claude.write_text(json.dumps({"type": "user", "message": {
+                "role": "user", "content": [{"type": "text", "text": ["no", "render"]}],
+            }}), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_claude(claude, events))
+            self.assertTrue(any("text 不是字符串" in event and not ic._is_expected_exclusion(event) for event in events))
+
+    def test_unknown_roles_and_types_are_generic_non_expected_failures(self) -> None:
+        """Parser events must be actionable without carrying raw export values."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            secret = "raw-type-secret"
+
+            chatgpt = root / "conversations-000.json"
+            chatgpt.write_text(json.dumps([{"id": "safe", "mapping": {
+                "root": {"parent": None, "children": ["system"]},
+                "system": {"parent": "root", "children": ["tool"], "message": {
+                    "author": {"role": "system"}, "content": {"parts": ["internal"]}}},
+                "tool": {"parent": "system", "children": ["bad"], "message": {
+                    "author": {"role": "tool"}, "content": {"parts": ["internal"]}}},
+                "bad": {"parent": "tool", "children": ["answer"], "message": {
+                    "author": {"role": {"secret": secret}}, "content": {"parts": ["hidden"]}}},
+                "answer": {"parent": "bad", "children": [], "message": {
+                    "author": {"role": "assistant"}, "content": {"parts": ["visible"]}}},
+            }}]), encoding="utf-8")
+            chat_convs, chat_skipped, _total = ic.parse_chatgpt(chatgpt)
+            self.assertEqual(len(chat_convs), 1)
+            self.assertIn("未知 ChatGPT 消息角色", [reason for _ref, reason in chat_skipped])
+            self.assertEqual(sum(reason == "内部内容已排除：ChatGPT 已知消息角色"
+                                 for _ref, reason in chat_skipped), 2)
+
+            codex = root / "rollout.jsonl"
+            codex.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                    {"type": secret}, {"type": {"secret": secret}},
+                    {"type": "input_text", "text": "visible"},
+                ]}},
+                {"type": "response_item", "payload": {"type": "message", "role": secret,
+                                                            "content": []}},
+                {"type": "response_item", "payload": {"type": "message", "role": "developer",
+                                                            "content": []}},
+                {"type": "response_item", "payload": {"type": "message", "role": "system",
+                                                            "content": []}},
+            ]), encoding="utf-8")
+            codex_events = []
+            self.assertIsNotNone(ic.parse_codex(codex, codex_events))
+            self.assertIn("未知 Codex 内容块类型", codex_events)
+            self.assertIn("未知 Codex 消息角色", codex_events)
+            self.assertEqual(sum(event == "内部内容已排除：Codex developer/system 消息"
+                                 for event in codex_events), 2)
+
+            claude = root / "claude.jsonl"
+            claude.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "user", "message": {"role": "user", "content": [
+                    {"type": secret}, {"type": {"secret": secret}},
+                    {"type": "text", "text": "visible"},
+                ]}},
+                {"type": "user", "message": {"role": secret, "content": "hidden"}},
+                {"type": secret, "payload": {}},
+            ]), encoding="utf-8")
+            claude_events = []
+            self.assertIsNotNone(ic.parse_claude(claude, claude_events))
+            self.assertIn("未知 Claude 内容块类型", claude_events)
+            self.assertIn("未知 Claude 消息角色", claude_events)
+            self.assertIn("未知 Claude 顶层记录类型", claude_events)
+
+            deepseek = root / "conversations.json"
+            deepseek.write_text(json.dumps([{"id": "safe", "mapping": {
+                "root": {"parent": None, "children": [], "message": {"fragments": [
+                    {"type": "REQUEST", "content": "visible"}, {"type": secret, "content": "hidden"},
+                ]}},
+            }}]), encoding="utf-8")
+            deep_convs, deep_skipped, _total = ic.parse_deepseek(deepseek)
+            self.assertEqual(len(deep_convs), 1)
+            self.assertIn("未识别 DeepSeek 片段", [reason for _ref, reason in deep_skipped])
+            deepseek.write_text(json.dumps([{"id": "safe", "mapping": {
+                "root": {"parent": None, "children": [], "message": {"fragments": [
+                    {"type": {"secret": secret}, "content": "hidden"},
+                ]}},
+            }}]), encoding="utf-8")
+            nested_convs, nested_skipped, _total = ic.parse_deepseek(deepseek)
+            self.assertEqual(nested_convs, [])
+            self.assertIn("会话片段 type 结构损坏", [reason for _ref, reason in nested_skipped])
+
+            failures = (chat_skipped + [("—", reason) for reason in codex_events + claude_events]
+                        + deep_skipped + nested_skipped)
+            for reason in ("未知 ChatGPT 消息角色", "未知 Codex 消息角色",
+                           "未知 Claude 消息角色", "未识别 DeepSeek 片段"):
+                self.assertTrue(any(event == reason and not ic._is_expected_exclusion(event)
+                                    for _ref, event in failures))
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(4, 4, 0, 0, 0, failures, "local", False)
+            self.assertNotIn(secret, stream.getvalue())
+
+    def test_chatgpt_shared_branch_role_events_are_counted_per_mapping_node(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            def message(role, text):
+                return {"author": {"role": role}, "content": {"parts": [text]}}
+            p.write_text(json.dumps([{"id": "shared", "mapping": {
+                "root": {"parent": None, "children": ["system"]},
+                "system": {"parent": "root", "children": ["tool"], "message": message("system", "internal")},
+                "tool": {"parent": "system", "children": ["unknown-a"], "message": message("tool", "internal")},
+                "unknown-a": {"parent": "tool", "children": ["unknown-b"], "message": message("future", "internal")},
+                "unknown-b": {"parent": "unknown-a", "children": ["user"], "message": message([], "internal")},
+                "user": {"parent": "unknown-b", "children": ["left", "right"], "message": message("user", "prompt")},
+                "left": {"parent": "user", "children": [], "message": message("assistant", "left")},
+                "right": {"parent": "user", "children": [], "message": message("assistant", "right")},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            reasons = [reason for _ref, reason in skipped]
+            self.assertEqual(len(convs), 2)
+            self.assertEqual(sum(reason == "内部内容已排除：ChatGPT 已知消息角色" for reason in reasons), 2)
+            self.assertEqual(sum(reason == "未知 ChatGPT 消息角色" for reason in reasons), 2)
+
+    def test_chatgpt_shared_branch_reasoning_and_unknown_parts_are_counted_once(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([{"id": "shared", "mapping": {
+                "root": {"parent": None, "children": ["reasoning"]},
+                "reasoning": {"parent": "root", "children": ["user"], "message": {
+                    "author": {"role": "assistant"}, "content": {
+                        "content_type": "reasoning", "parts": ["internal"]}}},
+                "user": {"parent": "reasoning", "children": ["left", "right"], "message": {
+                    "author": {"role": "user"}, "content": {
+                        "parts": ["prompt", {"opaque": 1}, {"opaque": 2}]}}},
+                "left": {"parent": "user", "children": [], "message": {
+                    "author": {"role": "assistant"}, "content": {"parts": ["left"]}}},
+                "right": {"parent": "user", "children": [], "message": {
+                    "author": {"role": "assistant"}, "content": {"parts": ["right"]}}},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            reasons = [reason for _ref, reason in skipped]
+            self.assertEqual(len(convs), 2)
+            self.assertEqual(reasons.count("内部内容已排除：ChatGPT reasoning 1 个"), 1)
+            self.assertEqual(reasons.count("未识别 ChatGPT 附件 2 个"), 1)
+            expected = [(ref, reason) for ref, reason in skipped if ic._is_expected_exclusion(reason)]
+            self.assertEqual(ic._expected_exclusion_count(expected), 1)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(1, 2, 0, 0, 0, skipped, "chatgpt", False)
+            self.assertIn("预期内部内容排除 1 个片段", stream.getvalue())
+
+    def test_codex_record_types_are_classified_without_raw_values(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rollout-types.jsonl"
+            secret = "private-type-value"
+            known_top = ["session_meta", "turn_context", "event_msg", "compacted",
+                         "inter_agent_communication_metadata", "world_state"]
+            known_payload = ["agent_message", "custom_tool_call", "custom_tool_call_output",
+                             "function_call", "function_call_output", "image_generation_call",
+                             "reasoning", "tool_search_call", "tool_search_output", "web_search_call"]
+            records = ([{"type": record_type} for record_type in known_top]
+                       + [{"type": secret}, {"type": {"secret": secret}}]
+                       + [{"type": "response_item", "payload": {"type": record_type}}
+                          for record_type in known_payload]
+                       + [{"type": "response_item", "payload": {"type": secret}},
+                          {"type": "response_item", "payload": {"type": {"secret": secret}}},
+                          {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                                         "content": [{"type": "input_text", "text": "visible"}]}}])
+            p.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+            events = []
+            convs = ic.parse_codex(p, events)
+            self.assertIsNotNone(convs)
+            self.assertEqual(sum(event == "内部内容已排除：Codex 已知顶层记录" for event in events),
+                             len(known_top))
+            self.assertEqual(sum(event == "内部内容已排除：Codex 已知响应记录" for event in events),
+                             len(known_payload))
+            self.assertEqual(sum(event == "未知 Codex 顶层记录类型" for event in events), 2)
+            self.assertEqual(sum(event == "未知 Codex 响应记录类型" for event in events), 2)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(len(records), 1, 0, 0, 0,
+                                [("—", event) for event in events], "local", False)
+            self.assertNotIn(secret, stream.getvalue())
+
+    def test_claude_non_string_type_is_structured_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "c.jsonl"
+            p.write_text(json.dumps({"type": [], "message": {}}), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_claude(p, events))
+            self.assertTrue(any("type 不是字符串" in event for event in events))
+            with self.assertRaises(ic.ImportError_):
+                ic._classify_local_file(p, "auto")
+
+    def test_peek_ignores_non_object_codex_payload_and_claude_message(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex = root / "rollout-peek.jsonl"
+            codex.write_text(json.dumps({"payload": []}), encoding="utf-8")
+            self.assertEqual(ic._peek("codex", codex), (None, None, ""))
+            claude = root / "peek-claude.jsonl"
+            claude.write_text(json.dumps({"type": "user", "message": []}), encoding="utf-8")
+            self.assertEqual(ic._peek("claude", claude), (None, None, ""))
+
+    def test_preview_and_codex_session_id_never_stringify_nested_values(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex = root / "rollout-fallback.jsonl"
+            codex.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "session_meta", "payload": {"id": {"secret_key": "secret_value"}}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": {"secret_key": "secret_value"}},
+                ]}},
+            ]), encoding="utf-8")
+            _first, _last, title = ic._peek("codex", codex)
+            self.assertEqual(title, "")
+            with self.assertRaisesRegex(ic.ImportError_, "Codex session ID 无效"):
+                ic._codex_session_id(codex)
+
+            claude = root / "claude-preview.jsonl"
+            claude.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": ["secret_key", "secret_value"]},
+                {"type": "text", "text": {"secret_key": "secret_value"}},
+            ]}}), encoding="utf-8")
+            _first, _last, title = ic._peek("claude", claude)
+            self.assertEqual(title, "")
+            self.assertNotIn("secret_key", title)
+            self.assertNotIn("secret_value", title)
+
+    def test_nested_metadata_never_enters_parser_output_or_state(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            secret = "nested-metadata-secret"
+            chatgpt = root / "conversations-000.json"
+            chatgpt.write_text(json.dumps([{"id": {"secret": secret}, "title": [secret], "current_node": "n", "mapping": {
+                "n": {"parent": None, "children": [], "message": {"id": {"secret": secret},
+                    "author": {"role": "user"}, "content": {"parts": ["chatgpt visible"]}}},
+            }}]), encoding="utf-8")
+            cg_first, cg_skipped, _total = ic.parse_chatgpt(chatgpt)
+            self.assertEqual(cg_first, [])
+            self.assertIn("ChatGPT 会话 ID 无效", [reason for _ref, reason in cg_skipped])
+
+            deepseek = root / "conversations.json"
+            deepseek.write_text(json.dumps([{"id": [secret], "title": {"secret": secret}, "mapping": {
+                "n": {"parent": None, "children": [], "message": {"fragments": [
+                    {"type": "REQUEST", "content": "deepseek visible"},
+                ]}},
+            }}]), encoding="utf-8")
+            ds, ds_skipped, _total = ic.parse_deepseek(deepseek)
+            self.assertEqual(ds, [])
+            self.assertIn("DeepSeek 会话 ID 无效", [reason for _ref, reason in ds_skipped])
+
+            codex = root / "rollout-codex.jsonl"
+            codex.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "session_meta", "payload": {"id": {"secret": secret}}},
+                {"type": "response_item", "timestamp": "2026-08-01T10:00:00Z", "payload": {
+                    "type": "message", "role": "user", "id": {"secret": secret},
+                    "content": [{"type": "input_text", "text": "codex visible"}],
+                }},
+            ]), encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "Codex session ID 无效"):
+                ic.parse_codex(codex)
+
+            claude = root / "claude.jsonl"
+            claude.write_text(json.dumps({"type": "user", "uuid": {"secret": secret}, "message": {
+                "role": "user", "content": "claude visible",
+            }}), encoding="utf-8")
+            cl = ic.parse_claude(claude)[0]
+            self.assertTrue(cl[4][0][2].startswith("fp-"))
+
+            out = root / "out"
+            imported = {}
+            self.assertEqual(ic.write_conversation(cl, imported, out), "new")
+            rendered = "\n".join(path.read_text(encoding="utf-8") for path in out.glob("*.md"))
+            self.assertNotIn(secret, rendered)
+            self.assertNotIn(secret, json.dumps(imported, ensure_ascii=False))
+
+    def test_chatgpt_and_deepseek_invalid_conversation_ids_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            invalid_ids = [None, "", True, {"nested": 1}, ["nested"]]
+            chatgpt = root / "conversations-000.json"
+            chatgpt.write_text(json.dumps([{"id": cid, "mapping": {
+                "n": {"parent": None, "children": [], "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["visible"]}}},
+            }} for cid in invalid_ids]), encoding="utf-8")
+            cg, cg_skipped, cg_total = ic.parse_chatgpt(chatgpt)
+            self.assertEqual((cg_total, cg), (len(invalid_ids), []))
+            self.assertEqual(sum(reason == "ChatGPT 会话 ID 无效" for _ref, reason in cg_skipped),
+                             len(invalid_ids))
+
+            deepseek = root / "conversations.json"
+            deepseek.write_text(json.dumps([{"id": cid, "mapping": {
+                "n": {"parent": None, "children": [], "message": {
+                    "fragments": [{"type": "REQUEST", "content": "visible"}]}},
+            }} for cid in invalid_ids]), encoding="utf-8")
+            ds, ds_skipped, ds_total = ic.parse_deepseek(deepseek)
+            self.assertEqual((ds_total, ds), (len(invalid_ids), []))
+            self.assertEqual(sum(reason == "DeepSeek 会话 ID 无效" for _ref, reason in ds_skipped),
+                             len(invalid_ids))
+
+    def test_gemini_and_deepseek_multiple_candidates_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name in ("one", "two"):
+                directory = root / name
+                directory.mkdir()
+                (directory / "我的活动记录.html").write_text("<div></div>", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "^Gemini 活动文件候选不唯一$"):
+                ic.parse_gemini(root)
+
+            deep_root = root / "deepseek"
+            for name in ("one", "two"):
+                directory = deep_root / name
+                directory.mkdir(parents=True)
+                (directory / "conversations.json").write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "^DeepSeek conversations\\.json 候选不唯一$"):
+                ic.parse_deepseek(deep_root)
+
+            archive = root / "deepseek.zip"
+            with zipfile.ZipFile(archive, "w") as z:
+                z.writestr("one/conversations.json", "[]")
+                z.writestr("two/conversations.json", "[]")
+            with self.assertRaisesRegex(ic.ImportError_, "^DeepSeek ZIP conversations\\.json 候选不唯一$"):
+                ic.parse_deepseek(archive)
+
+    def test_deepseek_zip_requires_exact_conversations_json_basename(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            decoys = root / "decoys.zip"
+            with zipfile.ZipFile(decoys, "w") as z:
+                z.writestr("not-conversations.json", "[]")
+                z.writestr("folder/myconversations.json", "[]")
+                z.writestr("folder/conversations.json/", "")
+            with self.assertRaisesRegex(ic.ImportError_, "^DeepSeek ZIP 未找到 conversations\\.json$"):
+                ic.parse_deepseek(decoys)
+
+            nested = root / "nested.zip"
+            with zipfile.ZipFile(nested, "w") as z:
+                z.writestr("folder/conversations.json", "[]")
+            self.assertEqual(ic.parse_deepseek(nested), ([], [], 0))
+
+    def test_claude_excludes_internal_records_not_marker_mentions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "c.jsonl"
+            records = [
+                {"type": "user", "uuid": "meta", "isMeta": True, "message": {"role": "user", "content": "meta"}},
+                {"type": "assistant", "uuid": "side", "isSidechain": True, "message": {"role": "assistant", "content": "side"}},
+                {"type": "user", "uuid": "cmd", "message": {"role": "user", "content": "<command-name>build</command-name>"}},
+                {"type": "user", "uuid": "real", "message": {"role": "user", "content": "代码提到了 command-name，别删除。"}},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_claude(p)
+            self.assertEqual([m[2] for m in convs[0][4]], ["real"])
+
+    def test_claude_excludes_complete_internal_wrapper_sequences(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "c.jsonl"
+            records = [
+                {"type": "user", "uuid": "commands", "message": {"role": "user", "content": (
+                    "<command-name>build</command-name>\n<command-message>run</command-message>\n<command-args>--fast</command-args>")}},
+                {"type": "user", "uuid": "task", "message": {"role": "user", "content": (
+                    "<task-notification><task-id>x</task-id><tool-use-id>y</tool-use-id><output-file>/tmp/z</output-file><status>done</status><summary>ok</summary></task-notification>")}},
+                {"type": "user", "uuid": "real", "message": {"role": "user", "content": "我提到了 command-args，但这是真实问题。"}},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_claude(p)
+            self.assertEqual([m[2] for m in convs[0][4]], ["real"])
+
+    def test_claude_conflicting_outer_and_inner_roles_are_rejected_privately(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "roles.jsonl"
+            secret = "private-claude-role-content"
+            p.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "user", "message": {"role": "assistant", "content": secret}},
+                {"type": "assistant", "message": {"role": "user", "content": secret}},
+            ]), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_claude(p, events))
+            self.assertEqual(events, ["Claude 消息角色冲突", "Claude 消息角色冲突"])
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(2, 0, 0, 0, 0,
+                                [("private-ref", event) for event in events], "local", False)
+            report = stream.getvalue()
+            self.assertIn("Claude 消息角色冲突 ×2", report)
+            self.assertNotIn(secret, report)
+            self.assertNotIn("private-ref", report)
+
+    def test_local_parsers_report_internal_exclusions_and_unknown_records(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex = root / "rollout-report.jsonl"
+            codex.write_text("\n".join([
+                json.dumps({"type": "session_meta", "payload": {"id": "report"}}),
+                "{ bad json",
+                json.dumps({"timestamp": "2026-08-01T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# Files mentioned by the user:\n<path>/x</path>"}]}}),
+                json.dumps({"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "普通文字提到 # Files mentioned by the user:"}]}}),
+            ]), encoding="utf-8")
+            codex_events = []
+            codex_convs = ic.parse_codex(codex, codex_events)
+            self.assertIn("普通文字提到", codex_convs[0][4][0][3])
+            self.assertTrue(any(reason.startswith("内部内容已排除") for reason in codex_events))
+            self.assertTrue(any(reason.startswith("损坏 JSONL 行") for reason in codex_events))
+
+            claude = root / "claude-report.jsonl"
+            claude.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in [
+                {"type": "user", "isMeta": True, "message": {"role": "user", "content": "meta"}},
+                {"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": "side"}},
+                {"type": "user", "message": {"role": "user", "content": "claude --resume x"}},
+                {"type": "user", "message": {"role": "user", "content": "<command-name>x</command-name>"}},
+                {"type": "future-internal", "payload": {"x": 1}},
+                {"type": "user", "uuid": "real", "message": {"role": "user", "content": "普通文本提到 command-name"}},
+            ]), encoding="utf-8")
+            claude_events = []
+            claude_convs = ic.parse_claude(claude, claude_events)
+            self.assertEqual([m[2] for m in claude_convs[0][4]], ["real"])
+            self.assertGreaterEqual(sum(reason.startswith("内部内容已排除") for reason in claude_events), 4)
+            self.assertIn("未知 Claude 顶层记录类型", claude_events)
+
+    def test_claude_known_top_level_internal_types_are_expected_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "known-types.jsonl"
+            known_types = [
+                "system", "mode", "permission-mode", "file-history-snapshot",
+                "ai-title", "last-prompt", "attachment", "queue-operation",
+            ]
+            records = [{"type": record_type, "payload": {}} for record_type in known_types]
+            records += [
+                {"type": "future-internal", "payload": {}},
+                {"type": "user", "uuid": "real", "message": {"role": "user", "content": "真实内容"}},
+            ]
+            p.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+            events = []
+            convs = ic.parse_claude(p, events)
+            self.assertEqual([m[2] for m in convs[0][4]], ["real"])
+            expected = [reason for reason in events if reason.startswith("内部内容已排除")]
+            unknown = [reason for reason in events if reason == "未知 Claude 顶层记录类型"]
+            self.assertEqual(len(expected), len(known_types))
+            self.assertEqual(len(unknown), 1)
+
+    def test_claude_known_content_blocks_are_expected_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "content-blocks.jsonl"
+            records = [
+                {"type": "user", "message": {"role": "user", "content": [{"type": "tool_use", "id": "x"}]}},
+                {"type": "assistant", "uuid": "mixed", "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "可见回答"}, {"type": "thinking", "thinking": "内部"},
+                    {"type": "tool_result", "content": "内部结果"},
+                ]}},
+                {"type": "user", "message": {"role": "user", "content": [{"type": "future-block", "x": 1}]}},
+                {"type": "user", "uuid": "real", "message": {"role": "user", "content": "真实问题"}},
+            ]
+            p.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records), encoding="utf-8")
+            events = []
+            convs = ic.parse_claude(p, events)
+            self.assertEqual([m[2] for m in convs[0][4]], ["mixed", "real"])
+            self.assertEqual(convs[0][4][0][3], "可见回答")
+            self.assertEqual(sum(reason.startswith("内部内容已排除") for reason in events), 3)
+            self.assertEqual(sum(reason == "未知 Claude 内容块类型" for reason in events), 1)
+
+    def test_claude_image_content_block_uses_safe_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "images.jsonl"
+            p.write_text(json.dumps({"type": "user", "uuid": "image", "message": {"role": "user", "content": [
+                {"type": "text", "text": "请看图片"},
+                {"type": "image", "source": {"type": "base64", "data": "private-image-bytes"}},
+            ]}}, ensure_ascii=False), encoding="utf-8")
+            events = []
+            convs = ic.parse_claude(p, events)
+            text = convs[0][4][0][3]
+            self.assertIn("请看图片", text)
+            self.assertIn("[图片]", text)
+            self.assertNotIn("source", text)
+            self.assertNotIn("private-image-bytes", text)
+            self.assertFalse(any(reason.startswith("未知内部记录告警") for reason in events))
+
+    def test_missing_local_ids_are_occurrence_unique_and_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex = root / "rollout-no-ids.jsonl"
+            codex.write_text("\n".join([
+                json.dumps({"type": "session_meta", "payload": {"id": "codex-no-ids"}}),
+                json.dumps({"timestamp": "2026-08-01T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "repeat"}]}}),
+                json.dumps({"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "repeat"}]}}),
+            ]), encoding="utf-8")
+            first = ic.parse_codex(codex)[0]
+            second = ic.parse_codex(codex)[0]
+            self.assertEqual([m[2] for m in first[4]], [m[2] for m in second[4]])
+            self.assertEqual(len({m[2] for m in first[4]}), 2)
+            out = root / "out"
+            imported = {}
+            self.assertEqual(ic.write_conversation(first, imported, out), "new")
+            self.assertEqual(ic.write_conversation(second, imported, out), "dup")
+
+            claude = root / "claude-no-ids.jsonl"
+            claude.write_text("\n".join(json.dumps(r) for r in [
+                {"type": "user", "timestamp": "2026-08-01T11:00:00Z", "message": {"role": "user", "content": "repeat"}},
+                {"type": "user", "timestamp": "2026-08-01T11:00:01Z", "message": {"role": "user", "content": "repeat"}},
+            ]), encoding="utf-8")
+            claude_first = ic.parse_claude(claude)[0]
+            claude_second = ic.parse_claude(claude)[0]
+            self.assertEqual([m[2] for m in claude_first[4]], [m[2] for m in claude_second[4]])
+            self.assertEqual(len({m[2] for m in claude_first[4]}), 2)
+            self.assertEqual(ic.write_conversation(claude_first, imported, out), "new")
+            self.assertEqual(ic.write_conversation(claude_second, imported, out), "dup")
+
+    def test_claude_skips_cli_lines(self) -> None:
+        convs = ic.parse_claude(FIXTURE / "claude" / "projects" / "-tmp"
+                                / "fake-claude-session-001.jsonl")
+        self.assertIsNotNone(convs)
+        _src, cid, _title, _exp, msgs = convs[0]
+        self.assertEqual(cid, "fake-claude-session-001")
+        self.assertEqual(len(msgs), 2)  # claude --resume 行被跳过
+        self.assertEqual(msgs[0][2], "cu1")
+
+    def test_gemini_real_structure(self) -> None:
+        convs, skipped, total = ic.parse_gemini(FIXTURE / "gemini" / "takeout")
+        self.assertEqual(len(convs), 1)
+        _src, _cid, _title, _exp, msgs = convs[0]
+        self.assertEqual([m[0] for m in msgs], ["user", "assistant"])
+        self.assertEqual(msgs[0][1], "2026-08-02 15:00")
+        self.assertIn("东京待三天", msgs[0][3])
+
+    def test_gemini_document_close_rejects_truncated_container_without_prefix_import(self) -> None:
+        completed = (
+            '<div class="outer-cell"><div class="content-cell mdl-typography--body-1">'
+            'Prompted: complete question</div><div class="content-cell mdl-typography--body-1">'
+            '2026年8月3日 16:05:00 CST</div><p>complete answer</p></div>')
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text(completed, encoding="utf-8")
+            convs, skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs), skipped), (1, 1, []))
+
+            p.write_text(completed + '<div class="outer-cell"><div class="content-cell '
+                         'mdl-typography--body-1">Prompted: truncated', encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "Gemini 活动容器未闭合"):
+                ic.parse_gemini(p)
+
+    def test_gemini_activity_container_keeps_data_nodes_separate(self) -> None:
+        convs, _skipped, total = ic.parse_gemini(FIXTURE / "gemini" / "activity-container.html")
+        self.assertEqual((total, len(convs)), (1, 1))
+        msgs = convs[0][4]
+        self.assertEqual([m[0] for m in msgs], ["user", "assistant"])
+        self.assertEqual({m[1] for m in msgs}, {"2026-08-03 16:05"})
+        self.assertIn("[附件: map.pdf]", msgs[0][3])
+        self.assertIn("第一天先去博物馆", msgs[1][3])
+        self.assertNotIn("Gemini Apps", "\n".join(m[3] for m in msgs))
+
+    def test_gemini_prompt_date_lines_are_not_activity_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div>Gemini Apps</div><div>Prompted：</div>
+<div>2026年8月1日 上午9:00</div><div>2026年8月2日 下午3:00</div>
+<div>请比较这两个时间安排。</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><br><p>可以先处理第一项。</p></div></div></body></html>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            msgs = convs[0][4]
+            self.assertEqual({m[1] for m in msgs}, {"2026-08-03 16:05"})
+            self.assertIn("2026年8月1日 上午9:00", msgs[0][3])
+            self.assertIn("2026年8月2日 下午3:00", msgs[0][3])
+            self.assertIn("可以先处理第一项", msgs[1][3])
+
+    def test_gemini_structural_time_preserves_date_in_answer_and_ids_are_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div>Gemini Apps</div><div>Prompted：请安排</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><br><p>回答中提到 2026年8月5日 上午9:00。</p></div></div></body></html>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            cid = convs[0][1]
+            msgs = convs[0][4]
+            self.assertEqual({m[1] for m in msgs}, {"2026-08-03 16:05"})
+            self.assertIn("2026年8月5日 上午9:00", msgs[1][3])
+            self.assertEqual([m[2] for m in msgs], [f"{cid}:user:1", f"{cid}:assistant:2"])
+
+    def test_gemini_unstructured_inline_time_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div>Prompted：问题</div><div>2026年8月3日 下午4:05</div><div>回答</div>
+</div></body></html>""", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "无法可靠绑定"):
+                ic.parse_gemini(p)
+
+    def test_gemini_multiple_structural_inline_times_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div>Prompted：问题</div>
+<div class='content-cell mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div class='content-cell mdl-typography--body-1'>2026年8月4日 下午4:05</div>
+<div><br><p>回答</p></div></div></body></html>""", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "多个结构化活动时间"):
+                ic.parse_gemini(p)
+
+    def test_gemini_multiple_structural_prompted_markers_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body><div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：first</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：second</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><p>answer</p></div></div></body></html>""", encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "多个结构化 Prompted 标记"):
+                ic.parse_gemini(p)
+
+    def test_gemini_legacy_answer_keeps_date_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:00</div><div>Prompted：问题</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:01</div><div>Gemini：回答提到 2026年8月5日 上午9:00</div></div>""", encoding="utf-8")
+            convs, _skipped, _total = ic.parse_gemini(p)
+            self.assertIn("2026年8月5日 上午9:00", convs[0][4][1][3])
+
+    def test_gemini_only_strips_structural_labels(self) -> None:
+        self.assertEqual(ic._gemini_user_text(["Prompted：正文"], {0}), "正文")
+        self.assertEqual(ic._gemini_user_text(["Prompted：正文"]), "Prompted：正文")
+        self.assertEqual(ic._gemini_user_text(["Prompted by a person"]), "Prompted by a person")
+        self.assertEqual(ic._gemini_answer_text(["Gemini：回答", "Gemini can help"],
+                                                 provider_indexes={0}), "回答\nGemini can help")
+
+    def test_gemini_direct_no_colon_prompted_label_is_structural(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted actual prompt</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><br><p>Gemini can help with this.</p></div></div>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            msgs = convs[0][4]
+            self.assertEqual(msgs[0][3], "actual prompt")
+            self.assertEqual(msgs[1][3], "Gemini can help with this.")
+
+    def test_gemini_nested_colon_answer_is_not_provider_label(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：question</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><p>Gemini: this is visible</p></div></div>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            self.assertEqual(convs[0][4][0][3], "question")
+            self.assertEqual(convs[0][4][1][3], "Gemini: this is visible")
+
+    def test_gemini_removes_chrome_only_from_proven_metadata_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'>
+<div class='header-cell'>Gemini Apps</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：<span>Gemini Apps in prompt</span></div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>https://gemini.google.com/ordinary-user-url</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div class='mdl-typography--caption'>Gemini Apps</div><div class='mdl-typography--caption'>https://gemini.google.com/activity</div>
+<div><p>Gemini Apps in answer</p><p>https://gemini.google.com/ordinary-answer-url</p></div>
+</div>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            user, answer = (m[3] for m in convs[0][4])
+            self.assertIn("Gemini Apps in prompt", user)
+            self.assertIn("ordinary-user-url", user)
+            self.assertEqual(answer, "Gemini Apps in answer\nhttps://gemini.google.com/ordinary-answer-url")
+
+    def test_gemini_splits_prompted_activities_with_stable_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<html><body>
+<div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:00</div><div>Prompted：重复问题</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月1日 下午3:01</div><div>Gemini：第一个回答</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月2日 下午3:00</div><div>Prompted：重复问题</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Attached 1 files.</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>a.pdf</div></div>
+<div class='outer-cell'><div class='header-cell'>2026年8月2日 下午3:01</div><div>Gemini：第二个回答</div></div>
+</body></html>""", encoding="utf-8")
+            convs, _skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (2, 2))
+            self.assertNotEqual(convs[0][1], convs[1][1])
+            self.assertEqual(convs[0][4][0][1], "2026-08-01 15:00")
+            self.assertIn("[附件: a.pdf]", convs[1][4][0][3])
+
+    def test_gemini_identical_activity_keys_get_stable_occurrences(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            block = "<div class='outer-cell'><div>Gemini Apps</div><div>Prompted：同一个问题</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><div><br><p>同一个回答</p></div></div>"
+            p.write_text(f"<html><body>{block}{block}</body></html>", encoding="utf-8")
+            first, _skipped, total = ic.parse_gemini(p)
+            second, _skipped, _total = ic.parse_gemini(p)
+            self.assertEqual((total, len(first)), (2, 2))
+            self.assertEqual([c[1] for c in first], [c[1] for c in second])
+            self.assertEqual(len({c[1] for c in first}), 2)
+            self.assertEqual(len({m[2] for c in first for m in c[4]}), 4)
+
+    def test_gemini_later_answer_updates_same_prompt_side_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'>
+<div class='header-cell'>2026年8月3日 下午4:05</div><div>Prompted：same prompt</div>
+</div>""", encoding="utf-8")
+            first, _skipped, _total = ic.parse_gemini(p)
+            out = Path(td) / "out"
+            imported = {}
+            self.assertEqual(ic.write_conversation(first[0], imported, out), "new")
+
+            p.write_text("""<div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：same prompt</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div>
+<div><p>later answer</p></div></div>""", encoding="utf-8")
+            second, _skipped, _total = ic.parse_gemini(p)
+            self.assertEqual(first[0][1], second[0][1])
+            self.assertEqual(first[0][4][0][2], second[0][4][0][2])
+            self.assertEqual(ic.write_conversation(second[0], imported, out), "update")
+            rendered = next(out.glob("*.md")).read_text(encoding="utf-8")
+            self.assertEqual(len(list(out.glob("*.md"))), 1)
+            self.assertIn("later answer", rendered)
+
+    def test_chatgpt_present_stale_current_node_fails_closed_without_leaking(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            mapping = {
+                "root": {"parent": None, "children": ["m"]},
+                "m": {"parent": "root", "children": [], "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["visible"]}}},
+            }
+            p.write_text(json.dumps([{
+                "id": "safe", "title": "private-title", "current_node": "private-stale-node",
+                "mapping": mapping,
+            }]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual(convs, [])
+            self.assertEqual([reason for _ref, reason in skipped], ["ChatGPT current_node 不存在"])
+            report = io.StringIO()
+            with redirect_stdout(report):
+                ic.print_report(1, 0, 0, 0, 0, skipped, "chatgpt", False)
+            self.assertNotIn("private-title", report.getvalue())
+            self.assertNotIn("private-stale-node", report.getvalue())
+            for current in (unittest.mock.DEFAULT, None):
+                record = {"id": "safe", "mapping": mapping}
+                if current is not unittest.mock.DEFAULT:
+                    record["current_node"] = current
+                p.write_text(json.dumps([record]), encoding="utf-8")
+                with self.subTest(current=current):
+                    fallback_convs, fallback_skipped, _ = ic.parse_chatgpt(p)
+                    self.assertEqual((len(fallback_convs), fallback_skipped), (1, []))
+
+    def test_gemini_known_information_and_unknown_containers_are_accounted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            chrome = "".join(
+                f"<div class='header-cell'>{line}</div>" for line in (
+                    "Gemini Apps", "商品：", "详细信息：", "为什么此处会显示此活动记录？", "控制这些设置"))
+            p.write_text(f"""<html><body>
+<div class='outer-cell'><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：visible</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><p>answer</p></div>
+<div class='outer-cell'>{chrome}<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:06</div></div>
+<div class='outer-cell'><div class='header-cell'>private unknown provider row</div></div>
+</body></html>""", encoding="utf-8")
+            convs, skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            reasons = [reason for _ref, reason in skipped]
+            self.assertIn("内部内容已排除：Gemini 已知信息活动", reasons)
+            self.assertIn("Gemini 未绑定活动容器", reasons)
+            report = io.StringIO()
+            with redirect_stdout(report):
+                ic.print_report(total, 1, 1, 0, 0, skipped, "gemini", False)
+            self.assertNotIn("private unknown", report.getvalue())
+            result = run_import("--source", "gemini", "--path", str(p), "--root", str(Path(td) / "out"), "--yes")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("Gemini 未绑定活动容器", result.stdout)
+            self.assertNotIn("private unknown", result.stdout)
+
+    def test_gemini_information_container_never_trusts_arbitrary_time_field_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            chrome = "".join(
+                f"<div class='header-cell'>{line}</div>" for line in (
+                    "Gemini Apps", "商品：", "详细信息：", "为什么此处会显示此活动记录？", "控制这些设置"))
+            p.write_text(f"""<div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：visible</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><p>answer</p></div>
+<div class='outer-cell'>{chrome}<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>private body in provider field</div></div>""", encoding="utf-8")
+            convs, skipped, _total = ic.parse_gemini(p)
+            self.assertEqual(len(convs), 1)
+            self.assertEqual([reason for _ref, reason in skipped], ["Gemini 未绑定活动容器"])
+            report = io.StringIO()
+            with redirect_stdout(report):
+                ic.print_report(1, 1, 1, 0, 0, skipped, "gemini", False)
+            self.assertNotIn("private body", report.getvalue())
+
+    def test_claude_session_id_is_stable_across_renames_and_conflicts_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            records = [
+                {"sessionId": "stable-session", "type": "user", "timestamp": "2026-08-01T10:00:00Z",
+                 "message": {"role": "user", "content": "visible"}},
+                {"sessionId": "stable-session", "type": "assistant", "timestamp": "2026-08-01T10:01:00Z",
+                 "message": {"role": "assistant", "content": "answer"}},
+            ]
+            first_path, renamed_path = root / "first.jsonl", root / "renamed.jsonl"
+            payload = "\n".join(json.dumps(record) for record in records)
+            first_path.write_text(payload, encoding="utf-8")
+            renamed_path.write_text(payload, encoding="utf-8")
+            first, renamed = ic.parse_claude(first_path)[0], ic.parse_claude(renamed_path)[0]
+            self.assertEqual(first[1], "stable-session")
+            self.assertEqual(first[1], renamed[1])
+            out, imported = root / "out", {}
+            self.assertEqual(ic.write_conversation(first, imported, out), "new")
+            self.assertEqual(ic.write_conversation(renamed, imported, out), "dup")
+
+            for bad_session in ("other-session", {"private": "nested"}):
+                bad = list(records)
+                bad[1] = dict(bad[1], sessionId=bad_session)
+                first_path.write_text("\n".join(json.dumps(record) for record in bad), encoding="utf-8")
+                with self.subTest(session=type(bad_session).__name__):
+                    with self.assertRaisesRegex(ic.ImportError_, "Claude sessionId"):
+                        ic.parse_claude(first_path)
+
+    def test_nonfinite_provider_and_claude_session_ids_fail_without_leaking(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            chatgpt, deepseek, claude = (root / "conversations-000.json", root / "conversations.json",
+                                         root / "claude.jsonl")
+            chat_mapping = {"root": {"parent": None, "children": [], "message": {
+                "author": {"role": "user"}, "content": {"parts": ["visible"]}}}}
+            deep_mapping = {"root": {"parent": None, "children": [], "message": {
+                "fragments": [{"type": "REQUEST", "content": "visible"}]}}}
+            for nonfinite in (float("nan"), float("inf"), -float("inf")):
+                with self.subTest(value=repr(nonfinite)):
+                    self.assertIsNone(ic._safe_scalar(nonfinite))
+                    chatgpt.write_text(json.dumps([{
+                        "id": nonfinite, "title": "private-chat-title", "mapping": chat_mapping,
+                    }]), encoding="utf-8")
+                    deepseek.write_text(json.dumps([{
+                        "id": nonfinite, "title": "private-deep-title", "mapping": deep_mapping,
+                    }]), encoding="utf-8")
+                    for parser, path, reason in ((ic.parse_chatgpt, chatgpt, "ChatGPT 会话 ID 无效"),
+                                                 (ic.parse_deepseek, deepseek, "DeepSeek 会话 ID 无效")):
+                        convs, skipped, _ = parser(path)
+                        self.assertEqual(convs, [])
+                        self.assertEqual([event for _ref, event in skipped], [reason])
+                        report = io.StringIO()
+                        with redirect_stdout(report):
+                            ic.print_report(1, 0, 0, 0, 0, skipped, "source", False)
+                        self.assertNotIn("private-", report.getvalue())
+                    claude.write_text(json.dumps({
+                        "sessionId": nonfinite, "type": "user", "message": {"role": "user", "content": "visible"},
+                    }), encoding="utf-8")
+                    with self.assertRaisesRegex(ic.ImportError_, "Claude sessionId 无效"):
+                        ic.parse_claude(claude)
+
+    def test_chatgpt_and_deepseek_branch_ids_survive_append_fork_and_reorder(self) -> None:
+        def node(source, role, text, parent, children):
+            if source == "chatgpt":
+                return {"parent": parent, "children": children, "message": {
+                    "id": f"{role}-{text}", "author": {"role": role}, "content": {"parts": [text]}}}
+            fragment_type = "REQUEST" if role == "user" else "RESPONSE"
+            return {"parent": parent, "children": children, "message": {
+                "fragments": [{"type": fragment_type, "content": text}]}}
+
+        for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
+                                         ("deepseek", "conversations.json", ic.parse_deepseek)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                p, out, imported = Path(td) / filename, Path(td) / "out", {}
+                mapping = {
+                    "root": {"parent": None, "children": ["u"]},
+                    "u": node(source, "user", "question", "root", ["a"]),
+                    "a": node(source, "assistant", "first", "u", []),
+                }
+
+                def parse_current():
+                    record = {"id": "stable", "mapping": mapping}
+                    p.write_text(json.dumps([record]), encoding="utf-8")
+                    return parser(p)[0]
+
+                first = parse_current()
+                self.assertEqual([conv[1] for conv in first], ["stable"])
+                self.assertEqual(ic.import_convs(first, [], 1, imported, out, False)[2], 1)
+                mapping["a"]["children"] = ["a2"]
+                mapping["a2"] = node(source, "assistant", "continued", "a", [])
+                appended = parse_current()
+                self.assertEqual([conv[1] for conv in appended], ["stable"])
+                self.assertEqual(ic.import_convs(appended, [], 1, imported, out, False)[3], 1)
+                mapping["u"]["children"] = ["a", "b"]
+                mapping["b"] = node(source, "assistant", "alternate", "u", [])
+                forked = parse_current()
+                forked_ids = {conv[1] for conv in forked}
+                self.assertIn("stable", forked_ids)
+                self.assertEqual(len(forked_ids), 2)
+                self.assertEqual(ic.import_convs(forked, [], 2, imported, out, False)[1], 2)
+                self.assertEqual(len(list(out.glob(f"{source}-*.md"))), 2)
+                mapping["u"]["children"] = ["b", "a"]
+                mapping = dict(reversed(list(mapping.items())))
+                reordered = parse_current()
+                self.assertEqual({conv[1] for conv in reordered}, forked_ids)
+                result = ic.import_convs(reordered, [], 2, imported, out, False)
+                self.assertEqual((result[2], result[3], result[4]), (0, 0, 2))
+                self.assertEqual(len(list(out.glob(f"{source}-*.md"))), 2)
+
+    def test_branch_state_continues_old_main_when_new_smaller_branch_is_added(self) -> None:
+        for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
+                                         ("deepseek", "conversations.json", ic.parse_deepseek)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                p, out, imported = Path(td) / filename, Path(td) / "out", {}
+                def message(role, text, parent, children):
+                    if source == "chatgpt":
+                        return {"parent": parent, "children": children, "message": {
+                            "id": text, "author": {"role": role}, "content": {"parts": [text]}}}
+                    return {"parent": parent, "children": children, "message": {
+                        "fragments": [{"type": "REQUEST" if role == "user" else "RESPONSE", "content": text}]}}
+                mapping = {"root": {"parent": None, "children": ["u"]},
+                           "u": message("user", "question", "root", ["z"]),
+                           "z": message("assistant", "old-main", "u", [])}
+                p.write_text(json.dumps([{"id": "stable", "mapping": mapping}]), encoding="utf-8")
+                first = parser(p)[0]
+                self.assertEqual(first[0][1], "stable")
+                ic.import_convs(first, [], 1, imported, out, False)
+                mapping["u"]["children"] = ["z", "a"]
+                mapping["a"] = message("assistant", "new-smaller", "u", [])
+                p.write_text(json.dumps([{"id": "stable", "mapping": dict(reversed(list(mapping.items())))}]), encoding="utf-8")
+                second = parser(p)[0]
+                result = ic.import_convs(second, [], 2, imported, out, False)
+                self.assertEqual(result[1], 2)
+                self.assertIn(f"{source}:stable", imported)
+                self.assertIn("old-main", (out / f"{source}-stable.md").read_text(encoding="utf-8"))
+                self.assertEqual(len(list(out.glob(f"{source}-*.md"))), 2)
+                managed = {str(path) for path in out.glob(f"{source}-*.md")}
+                claimed = {entry["path"] for key, entry in imported.items()
+                           if key.startswith(f"{source}:")}
+                self.assertEqual(claimed, managed)
+
+    def test_branch_lineage_cache_does_not_cross_independent_exports(self) -> None:
+        for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
+                                         ("deepseek", "conversations.json", ic.parse_deepseek)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                def node(role, text, parent, children):
+                    if source == "chatgpt":
+                        return {"parent": parent, "children": children, "message": {
+                            "id": text, "author": {"role": role}, "content": {"parts": [text]}}}
+                    return {"parent": parent, "children": children, "message": {
+                        "fragments": [{"type": "REQUEST" if role == "user" else "RESPONSE", "content": text}]}}
+                first = root / filename
+                first_mapping = {
+                    "root": {"parent": None, "children": ["u"]},
+                    "u": node("user", "one", "root", ["a", "b"]),
+                    "a": node("assistant", "first-a", "u", []),
+                    "b": node("assistant", "first-b", "u", []),
+                }
+                first.write_text(json.dumps([{"id": "same", "mapping": first_mapping}]), encoding="utf-8")
+                parser(first)
+                second = root / ("other-" + filename)
+                second_mapping = {
+                    "root": {"parent": None, "children": ["u"]},
+                    "u": node("user", "two", "root", ["z"]),
+                    "z": node("assistant", "second", "u", []),
+                }
+                second.write_text(json.dumps([{"id": "same", "mapping": second_mapping}]), encoding="utf-8")
+                conv = parser(second)[0][0]
+                self.assertEqual(conv[1], "same")
+                self.assertEqual(ic._branch_metadata(source, conv[1], conv[4]), ("same", ()))
+
+    def test_parse_a_then_parse_b_keeps_a_branch_evidence_for_later_import(self) -> None:
+        for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
+                                         ("deepseek", "conversations.json", ic.parse_deepseek)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                root, out, imported = Path(td), Path(td) / "out", {}
+                def node(role, text, parent, children):
+                    if source == "chatgpt":
+                        return {"parent": parent, "children": children, "message": {
+                            "id": text, "author": {"role": role}, "content": {"parts": [text]}}}
+                    return {"parent": parent, "children": children, "message": {
+                        "fragments": [{"type": "REQUEST" if role == "user" else "RESPONSE", "content": text}]}}
+                first, second = root / filename, root / ("other-" + filename)
+                first.write_text(json.dumps([{"id": "same", "mapping": {
+                    "r": {"parent": None, "children": ["u"]}, "u": node("user", "q", "r", ["a", "b"]),
+                    "a": node("assistant", "a", "u", []), "b": node("assistant", "b", "u", []),
+                }}]), encoding="utf-8")
+                parsed_a, _skipped, total = parser(first)
+                second.write_text(json.dumps([{"id": "same", "mapping": {
+                    "r": {"parent": None, "children": ["u"]}, "u": node("user", "other", "r", ["z"]),
+                    "z": node("assistant", "z", "u", []),
+                }}]), encoding="utf-8")
+                parser(second)
+                result = ic.import_convs(parsed_a, [], total, imported, out, False)
+                self.assertEqual(result[2], 2)
+                self.assertEqual(sum("branch_lineage" in entry for entry in imported.values()), 2)
+
+    def test_branch_state_continues_through_invisible_smaller_and_nested_forks(self) -> None:
+        for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
+                                         ("deepseek", "conversations.json", ic.parse_deepseek)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                export, out, imported = Path(td) / filename, Path(td) / "out", {}
+                def node(role, text, parent, children):
+                    if text is None:
+                        return {"parent": parent, "children": children, "message": None}
+                    if source == "chatgpt":
+                        return {"parent": parent, "children": children, "message": {
+                            "id": text, "author": {"role": role}, "content": {"parts": [text]}}}
+                    return {"parent": parent, "children": children, "message": {
+                        "fragments": [{"type": "REQUEST" if role == "user" else "RESPONSE", "content": text}]}}
+                mapping = {
+                    "root": {"parent": None, "children": ["u"]},
+                    "u": node("user", "question", "root", ["z"]),
+                    "z": node("assistant", "old", "u", []),
+                }
+                export.write_text(json.dumps([{"id": "stable", "mapping": mapping}]), encoding="utf-8")
+                ic.import_convs(parser(export)[0], [], 1, imported, out, False)
+                mapping["u"]["children"] = ["z", "a", "b"]
+                mapping["a"] = node("assistant", None, "u", [])
+                mapping["b"] = node("assistant", "nested", "u", ["b1", "b2"])
+                mapping["b1"] = node("assistant", "nested-one", "b", [])
+                mapping["b2"] = node("assistant", "nested-two", "b", [])
+                export.write_text(json.dumps([{"id": "stable", "mapping": dict(reversed(list(mapping.items())))}]), encoding="utf-8")
+                second = parser(export)[0]
+                ic.import_convs(second, [], 4, imported, out, False)
+                self.assertIn(f"{source}:stable", imported)
+                self.assertIn("old", (out / f"{source}-stable.md").read_text(encoding="utf-8"))
+                mapping["u"]["children"] = ["b", "a", "z"]
+                mapping["b"]["children"] = ["b2", "b1"]
+                export.write_text(json.dumps([{"id": "stable", "mapping": dict(reversed(list(mapping.items())))}]), encoding="utf-8")
+                third = parser(export)[0]
+                result = ic.import_convs(third, [], 4, imported, out, False)
+                self.assertEqual(result[4], 4)
+                managed = {str(path) for path in out.glob(f"{source}-*.md")}
+                claimed = {entry["path"] for key, entry in imported.items() if key.startswith(f"{source}:")}
+                self.assertEqual(claimed, managed)
+
+    def test_branch_identity_is_idempotent_with_shared_visible_ancestry(self) -> None:
+        """Sibling paths may legitimately render the same inherited messages."""
+        for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
+                                         ("deepseek", "conversations.json", ic.parse_deepseek)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                export, out, imported = Path(td) / filename, Path(td) / "out", {}
+                if source == "chatgpt":
+                    user_message = {"id": "u", "author": {"role": "user"}, "content": {"parts": ["question"]}}
+                else:
+                    user_message = {"fragments": [{"type": "REQUEST", "content": "question"}]}
+                mapping = {
+                    "root": {"parent": None, "children": ["u"]},
+                    "u": {"parent": "root", "children": ["a", "b"], "message": user_message},
+                    "a": {"parent": "u", "children": [], "message": None},
+                    "b": {"parent": "u", "children": ["c", "d"], "message": None},
+                    "c": {"parent": "b", "children": [], "message": None},
+                    "d": {"parent": "b", "children": [], "message": None},
+                }
+                export.write_text(json.dumps([{"id": "stable", "mapping": mapping}]), encoding="utf-8")
+                convs, skipped, total = parser(export)
+                self.assertEqual(len(convs), 3)
+                first = ic.import_convs(convs, list(skipped), total, imported, out, False)
+                state_before = copy.deepcopy(imported)
+                body_before = {path.name: ic._managed_parts(path.read_text(encoding="utf-8"), path)[1]
+                               for path in out.glob("*.md")}
+                second = ic.import_convs(convs, list(skipped), total, imported, out, False)
+                self.assertEqual(second[4], 3)
+                self.assertEqual(imported, state_before)
+                self.assertEqual({path.name: ic._managed_parts(path.read_text(encoding="utf-8"), path)[1]
+                                  for path in out.glob("*.md")}, body_before)
+                reparsed, skipped_again, total_again = parser(export)
+                third = ic.import_convs(reparsed, list(skipped_again), total_again, imported, out, False)
+                self.assertEqual(third[4], 3)
+                self.assertEqual(imported, state_before)
+                self.assertEqual(len(body_before), len(list(out.glob("*.md"))))
+
+    def test_imported_branch_metadata_validation_is_optional_but_strict(self) -> None:
+        base = {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": ["m"]}
+        self.assertEqual(ic._validate_imported_state({"chatgpt:x": dict(base)}), {"chatgpt:x": dict(base)})
+        valid = dict(base, branch_base="x", branch_lineage=["node-a", "node-b"])
+        self.assertEqual(ic._validate_imported_state({"chatgpt:x": valid}), {"chatgpt:x": valid})
+        invalids = [
+            dict(base, branch_base="x"),
+            dict(base, branch_lineage=["node"]),
+            dict(base, branch_base=" ", branch_lineage=["node"]),
+            dict(base, branch_base=True, branch_lineage=["node"]),
+            dict(base, branch_base="x", branch_lineage=[]),
+            dict(base, branch_base="x", branch_lineage=["node", "node"]),
+            dict(base, branch_base="x", branch_lineage=[{"private": "value"}]),
+        ]
+        for entry in invalids:
+            with self.subTest(entry=entry):
+                with self.assertRaises(ic.ImportError_) as raised:
+                    ic._validate_imported_state({"chatgpt:x": entry})
+                self.assertNotIn("private", str(raised.exception))
+
+    def test_imported_branch_metadata_cannot_claim_an_unrelated_state_key(self) -> None:
+        entry = {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": ["m"],
+                 "branch_base": "base", "branch_lineage": ["fork"]}
+        with self.assertRaises(ic.ImportError_):
+            ic._validate_imported_state({"chatgpt:attacker-chosen-cid": entry})
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"; out.mkdir()
+            ic.imported_path(out).write_text(json.dumps({"chatgpt:attacker-chosen-cid": entry}), encoding="utf-8")
+            with self.assertRaises(ic.ImportError_):
+                ic.load_imported(out)
+            self.assertFalse(list(out.glob("*.md")))
+
+    def test_codex_invalid_declared_session_id_fails_closed(self) -> None:
+        for invalid in (True, [], {}, " ", float("nan"), float("inf")):
+            with self.subTest(invalid=type(invalid).__name__), tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "rollout-fallback.jsonl"
+                path.write_text(json.dumps({"type": "session_meta", "payload": {"id": invalid}}), encoding="utf-8")
+                with self.assertRaisesRegex(ic.ImportError_, "Codex session ID 无效") as raised:
+                    ic._codex_session_id(path)
+                self.assertNotIn("nan", str(raised.exception).lower())
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout-fallback.jsonl"
+            path.write_text(json.dumps({"type": "session_meta", "payload": {}}), encoding="utf-8")
+            self.assertIsNone(ic._codex_session_id(path))
+
+    def test_codex_missing_session_id_uses_visible_content_identity_not_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            one, renamed = root / "rollout-one.jsonl", root / "renamed.jsonl"
+            rows = [
+                {"type": "session_meta", "payload": {}},
+                {"type": "response_item", "timestamp": "2026-08-01T10:00:00Z", "payload": {
+                    "type": "message", "role": "user", "id": "native-first",
+                    "content": [{"type": "input_text", "text": "visible"}]}},
+            ]
+            payload = "\n".join(json.dumps(row) for row in rows)
+            one.write_text(payload, encoding="utf-8"); renamed.write_text(payload, encoding="utf-8")
+            first, same = ic.parse_codex(one)[0], ic.parse_codex(renamed)[0]
+            self.assertEqual(first[1], same[1])
+            rows.append({"type": "response_item", "timestamp": "2026-08-01T10:01:00Z", "payload": {
+                "type": "message", "role": "assistant", "id": "later", "content": [{"type": "output_text", "text": "later"}]}})
+            renamed.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            self.assertEqual(ic.parse_codex(renamed)[0][1], first[1])
+
+    def test_gemini_chrome_position_preserves_non_allowlisted_body_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text("""<div class='outer-cell'><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：q</div><div class='header-cell'>private prompt header</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><div class='mdl-typography--caption'>private answer caption</div><p>answer</p></div>""", encoding="utf-8")
+            convs, skipped, _ = ic.parse_gemini(p)
+            self.assertEqual(skipped, [])
+            self.assertIn("private prompt header", convs[0][4][0][3])
+            self.assertIn("private answer caption", convs[0][4][1][3])
+
+    def test_gemini_information_caption_must_be_allowlisted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            chrome = "".join(f"<div class='header-cell'>{line}</div>" for line in (
+                "Gemini Apps", "商品：", "详细信息：", "为什么此处会显示此活动记录？", "控制这些设置"))
+            p.write_text(f"""<div class='outer-cell'><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：q</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><p>a</p></div><div class='outer-cell'>{chrome}<div class='mdl-typography--caption'>unallowlisted caption</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:06</div></div>""", encoding="utf-8")
+            convs, skipped, _ = ic.parse_gemini(p)
+            self.assertEqual(len(convs), 1)
+            self.assertEqual([reason for _ref, reason in skipped], ["Gemini 未绑定活动容器"])
+
+    def test_claude_missing_session_id_and_ambiguous_records_preserve_visible_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            first, renamed = root / "one.jsonl", root / "renamed.jsonl"
+            rows = [
+                {"type": "future-record", "timestamp": "2026-08-01T10:00:00Z",
+                 "message": {"role": "user", "content": "visible unknown"}},
+                {"type": "assistant", "timestamp": "2026-08-01T10:01:00Z",
+                 "message": {"role": "assistant", "content": "answer"}},
+            ]
+            payload = "\n".join(json.dumps(row) for row in rows)
+            first.write_text(payload, encoding="utf-8"); renamed.write_text(payload, encoding="utf-8")
+            events = []
+            one, two = ic.parse_claude(first, events)[0], ic.parse_claude(renamed)[0]
+            self.assertEqual(one[1], two[1])
+            self.assertTrue(one[1].startswith("fp-session-"))
+            self.assertIn("visible unknown", one[4][0][3])
+            self.assertIn("未知 Claude 顶层记录类型", events)
+
+
+class FmtTimeTests(unittest.TestCase):
+    def test_formats(self) -> None:
+        self.assertEqual(ic.fmt_time(1750000001),
+                         datetime.fromtimestamp(1750000001).strftime("%Y-%m-%d %H:%M"))
+        self.assertEqual(ic.fmt_time("2026-08-02T15:00:00+08:00"), "2026-08-02 15:00")
+        self.assertEqual(ic.fmt_time("2026年8月2日 下午3:00"), "2026-08-02 15:00")
+        self.assertEqual(ic.fmt_time("2026年6月3日 21:52:40 CST"), "2026-06-03 21:52")
+        self.assertEqual(ic.fmt_time("Aug 2, 2026, 3:00 PM"), "2026-08-02 15:00")
+        self.assertIsNone(ic.fmt_time("not a date"))
+        self.assertIsNone(ic.fmt_time(None))
+
+    def test_bool_timestamp_is_rejected_not_epoch(self) -> None:
+        # bool is an int subclass; malformed exports with create_time: true
+        # must not render as 1970-01-01.
+        self.assertIsNone(ic.fmt_time(True))
+        self.assertIsNone(ic.fmt_time(False))
+
+
+class CliTests(unittest.TestCase):
+    def _tmp(self) -> Path:
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        return Path(td.name) / "out"
+
+    def test_import_all_sources_and_perms(self) -> None:
+        out = self._tmp()
+        cases = [
+            ("chatgpt", str(FIXTURE / "chatgpt")),
+            ("deepseek", str(FIXTURE / "deepseek" / "conversations.json")),
+            ("gemini", str(FIXTURE / "gemini" / "takeout")),
+        ]
+        for src, path in cases:
+            r = run_import("--source", src, "--path", path, "--root", str(out), "--yes")
+            self.assertEqual(r.returncode, 0, r.stderr)
+        files = [p.name for p in out.glob("*.md")]
+        self.assertIn("chatgpt-chatgpt-conv-001.md", files)
+        self.assertIn("deepseek-deepseek-conv-001.md", files)
+        self.assertTrue(any(f.startswith("gemini-") for f in files))
+        imported = ic.load_imported(out)
+        self.assertIn("chatgpt:chatgpt-conv-001", imported)
+        self.assertIn("deepseek:deepseek-conv-001", imported)
+        # 权限：目录 0700、文件 0600
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o700)
+        for f in out.glob("*.md"):
+            self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(ic.imported_path(out)).st_mode & 0o777, 0o600)
+
+    def test_incremental_dedup_appends_new_messages(self) -> None:
+        out = self._tmp()
+        src = Path(tempfile.mkdtemp()) / "conversations-000.json"
+        conv = {"id": "inc", "title": "增量", "current_node": "m2", "mapping": {
+            "root": {"id": "root", "message": None, "parent": None, "children": ["m1"]},
+            "m1": {"id": "m1", "message": {"id": "m1", "author": {"role": "user"}, "content": {"parts": ["[SIMULATED] 你好"]}, "create_time": 1750000001}, "parent": "root", "children": ["m2"]},
+            "m2": {"id": "m2", "message": {"id": "m2", "author": {"role": "assistant"}, "content": {"parts": ["[SIMULATED] 你好！"]}, "create_time": 1750000002}, "parent": "m1", "children": []},
+        }}
+        src.write_text(json.dumps([conv], ensure_ascii=False), encoding="utf-8")
+        r1 = run_import("--source", "chatgpt", "--path", str(src), "--root", str(out), "--yes")
+        self.assertIn("导入 1", r1.stdout)
+        conv["mapping"]["m3"] = {"id": "m3", "message": {"id": "m3", "author": {"role": "user"}, "content": {"parts": ["[SIMULATED] 新问题"]}, "create_time": 1750000003}, "parent": "m2", "children": []}
+        conv["mapping"]["m2"]["children"] = ["m3"]
+        conv["current_node"] = "m3"
+        src.write_text(json.dumps([conv], ensure_ascii=False), encoding="utf-8")
+        r2 = run_import("--source", "chatgpt", "--path", str(src), "--root", str(out), "--yes")
+        content = (out / "chatgpt-inc.md").read_text(encoding="utf-8")
+        self.assertIn("新问题", content)
+        self.assertEqual(content.count("**user**"), 2)  # m1 + m3，旧消息未重复
+        self.assertEqual(content.count("**assistant**"), 1)  # m2
+
+    def test_crlf_message_is_rendered_once_and_then_duplicate(self) -> None:
+        out = self._tmp()
+        conv = ("chatgpt", "crlf", "标题", "2026-08-01", [
+            ("user", "2026-08-01 10:00", "u", "第一行\r\n第二行"),
+        ])
+        imported = {}
+        self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+        self.assertEqual(ic.write_conversation(conv, imported, out), "dup")
+        raw = (out / "chatgpt-crlf.md").read_bytes()
+        self.assertNotIn(b"\r", raw)
+        self.assertIn("第一行\n第二行".encode("utf-8"), raw)
+
+    def test_local_discovery_list_redacts_titles_ids_and_paths_in_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "private-root"
+            root.mkdir()
+            secret_path = root / "private-session-name.jsonl"
+            secret_path.write_text(json.dumps({
+                "type": "response_item", "timestamp": "2026-08-01T10:00:00Z",
+                "payload": {"type": "message", "role": "user", "id": "private-session-id",
+                            "content": [{"type": "input_text", "text": "private first body"}]},
+            }), encoding="utf-8")
+            result = run_import("--source", "local", "--path", str(root), "--dry-run", "--yes",
+                                "--root", str(Path(td) / "out"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("发现 1 个本地会话", result.stdout)
+            for secret in ("private-session-name", "private-session-id", "private first body", str(secret_path)):
+                self.assertNotIn(secret, result.stdout)
+
+    def test_output_hardlinks_are_rejected_before_read_chmod_or_write(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root, out = Path(td), Path(td) / "out"
+            out.mkdir()
+            external = root / "external.md"
+            external.write_text("external content", encoding="utf-8")
+            os.chmod(external, 0o644)
+            target = out / "chatgpt-linked.md"
+            os.link(external, target)
+            conv = ("chatgpt", "linked", "title", "2026-08-01", [("user", None, "u", "inside")])
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run):
+                    with self.assertRaisesRegex(ic.ImportError_, "安全普通文件|导入器目录"):
+                        ic.write_conversation(conv, {}, out, dry_run=dry_run)
+                    self.assertEqual(external.read_text(encoding="utf-8"), "external content")
+                    self.assertEqual(os.stat(external).st_mode & 0o777, 0o644)
+
+            target.unlink()
+            state_external = root / "external-state.json"
+            state_external.write_text("{}", encoding="utf-8")
+            os.chmod(state_external, 0o644)
+            os.link(state_external, ic.imported_path(out))
+            with self.assertRaisesRegex(ic.ImportError_, "安全普通文件|导入器目录"):
+                ic.load_imported(out)
+            self.assertEqual(state_external.read_text(encoding="utf-8"), "{}")
+            self.assertEqual(os.stat(state_external).st_mode & 0o777, 0o644)
+
+            gitkeep_out = root / "gitkeep-out"
+            gitkeep_out.mkdir()
+            external_keep = root / "external-gitkeep"
+            external_keep.write_text("", encoding="utf-8")
+            os.chmod(external_keep, 0o644)
+            os.link(external_keep, gitkeep_out / ".gitkeep")
+            with self.assertRaisesRegex(ic.ImportError_, "导入器目录"):
+                ic.load_imported(gitkeep_out)
+            self.assertEqual(os.stat(external_keep).st_mode & 0o777, 0o644)
+
+    def test_rendered_metadata_is_single_line_and_safe_ids_stay_readable(self) -> None:
+        out = self._tmp()
+        conv = ("chatgpt", "cid\n**assistant**\n<!-- x -->", "title", "2026-08-01", [
+            ("user", None, "mid\n**assistant**\n-->", "正文"),
+        ])
+        self.assertEqual(ic.write_conversation(conv, {}, out), "new")
+        content = next(out.glob("*.md")).read_text(encoding="utf-8")
+        self.assertNotIn("\n**assistant**（", content)
+        self.assertIn("cid\\n**assistant**", content)
+        self.assertIn("mid\\n**assistant**", content)
+        self.assertNotIn("<!-- x", content)
+        self.assertIn("&lt;!-- x --&gt;", content)
+        self.assertEqual(content.count("<!-- distill-messages:begin -->"), 1)
+        self.assertEqual(content.count("<!-- distill-messages:end -->"), 1)
+        self.assertEqual(ic._markdown_metadata("normal-id"), "normal-id")
+
+    def test_filename_sanitization_collision_fails_closed_in_batch_and_without_state(self) -> None:
+        out = self._tmp()
+        first = ("chatgpt", "a/b", "第一", "2026-08-01", [("user", None, "u1", "第一条")])
+        second = ("chatgpt", "a?b", "第二", "2026-08-01", [("user", None, "u2", "第二条")])
+        total, _outputs, new, updated, dup, skipped = ic.import_convs(
+            [first, second], [], 2, {}, out, dry_run=False)
+        self.assertEqual((total, new, updated, dup), (2, 1, 0, 0))
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("文件名冲突", skipped[0][1])
+        path = out / "chatgpt-a-b.md"
+        self.assertIn("第一条", path.read_text(encoding="utf-8"))
+        self.assertNotIn("第二条", path.read_text(encoding="utf-8"))
+
+        dry_out = out.parent / "dry-out"
+        _total, _outputs, dry_new, _updated, _dup, dry_skipped = ic.import_convs(
+            [first, second], [], 2, {}, dry_out, dry_run=True)
+        self.assertEqual(dry_new, 1)
+        self.assertEqual(len(dry_skipped), 1)
+        self.assertFalse(dry_out.exists())
+
+        # Interrupted state writes must not let a colliding header be overwritten.
+        with self.assertRaisesRegex(ic.ImportError_, "文件名冲突"):
+            ic.write_conversation(second, {}, out)
+        self.assertIn("第一条", path.read_text(encoding="utf-8"))
+
+        # A managed block alone does not establish ownership and must not be overwritten.
+        unowned = out.parent / "unowned"
+        unowned.mkdir()
+        unowned_path = unowned / "chatgpt-a-b.md"
+        original = "<!-- distill-messages:begin -->\n旧正文\n<!-- distill-messages:end -->\n"
+        unowned_path.write_text(original, encoding="utf-8")
+        with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是导入器目录"):
+            ic.write_conversation(first, {}, unowned)
+        self.assertEqual(unowned_path.read_text(encoding="utf-8"), original)
+
+    def test_batch_root_preflight_scans_managed_files_linearly(self) -> None:
+        out = self._tmp()
+        imported = {}
+        seed = ("chatgpt", "seed", "seed", "2026-08-01", [("user", None, "seed", "seed")])
+        self.assertEqual(ic.write_conversation(seed, imported, out), "new")
+        conversations = [
+            ("chatgpt", f"batch-{i}", "title", "2026-08-01",
+             [("user", None, f"m-{i}", "visible")])
+            for i in range(80)
+        ]
+        original_managed = ic._is_managed_markdown
+        original_guard = ic._assert_output_root_ownership
+        with (unittest.mock.patch.object(ic, "_is_managed_markdown", wraps=original_managed) as managed,
+              unittest.mock.patch.object(ic, "_assert_output_root_ownership", wraps=original_guard) as guard):
+            total, outputs, new, updated, dup, skipped = ic.import_convs(
+                conversations, [], len(conversations), imported, out, dry_run=False)
+        self.assertEqual((total, outputs, new, updated, dup, skipped), (80, 80, 80, 0, 0, []))
+        # One complete preflight plus save_imported's final revalidation; the
+        # 80 writes must not each rescan the growing Markdown directory.
+        self.assertEqual(guard.call_count, 2)
+        self.assertLessEqual(managed.call_count, 2 * (len(conversations) + 1) + 2)
+
+    def test_batch_path_owner_index_avoids_quadratic_state_collision_scans(self) -> None:
+        out = self._tmp()
+        prior_count = 400
+        imported = {
+            f"chatgpt:prior-{i}": {
+                "path": str(out.parent / f"prior-{i}.md"), "imported_at": "2026-08-01",
+                "title": "prior", "message_ids": [],
+            }
+            for i in range(prior_count)
+        }
+        conversations = [
+            ("chatgpt", f"indexed-{i}", "title", "2026-08-01",
+             [("user", None, f"m-{i}", "visible")])
+            for i in range(prior_count)
+        ]
+        with (unittest.mock.patch.object(ic, "_same_path", wraps=ic._same_path) as same_path,
+              unittest.mock.patch.object(ic, "_build_path_owner_index",
+                                         wraps=ic._build_path_owner_index) as build_index):
+            total, outputs, new, updated, dup, skipped = ic.import_convs(
+                conversations, [], len(conversations), imported, out, dry_run=True)
+        self.assertEqual((total, outputs, new, updated, dup, skipped),
+                         (prior_count, prior_count, prior_count, 0, 0, []))
+        self.assertEqual(build_index.call_count, 1)
+        self.assertEqual(same_path.call_count, 0)
+
+        duplicate_path = str(out.parent / "duplicate.md")
+        duplicate_state = {
+            "chatgpt:one": {"path": duplicate_path, "imported_at": "2026-08-01", "title": "x", "message_ids": []},
+            "chatgpt:two": {"path": duplicate_path, "imported_at": "2026-08-01", "title": "x", "message_ids": []},
+        }
+        with self.assertRaisesRegex(ic.ImportError_, "状态存在重复目标声明"):
+            ic.import_convs([], [], 0, duplicate_state, out.parent / "duplicate-out", dry_run=True)
+
+    def test_same_batch_conversation_key_is_rejected_without_overwriting_first(self) -> None:
+        out = self._tmp()
+        first = ("chatgpt", "same", "first", "2026-08-01", [("user", None, "u1", "first")])
+        second = ("chatgpt", "same", "second", "2026-08-01", [("user", None, "u2", "second")])
+        total, outputs, new, updated, dup, skipped = ic.import_convs(
+            [first, second], [], 2, {}, out, dry_run=False)
+        self.assertEqual((total, outputs, new, updated, dup), (2, 1, 1, 0, 0))
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("批次内重复会话键", skipped[0][1])
+        self.assertIn("first", (out / "chatgpt-same.md").read_text(encoding="utf-8"))
+        self.assertNotIn("second", (out / "chatgpt-same.md").read_text(encoding="utf-8"))
+
+    def test_output_symlink_is_rejected_without_touching_target(self) -> None:
+        out = self._tmp()
+        out.mkdir()
+        sentinel = out.parent / "sentinel.md"
+        sentinel.write_text("outside", encoding="utf-8")
+        os.chmod(sentinel, 0o644)
+        (out / "chatgpt-link.md").symlink_to(sentinel)
+        conv = ("chatgpt", "link", "title", "2026-08-01", [("user", None, "u", "inside")])
+        with self.assertRaisesRegex(ic.ImportError_, "符号链接"):
+            ic.write_conversation(conv, {}, out)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+        self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+
+    def test_output_root_and_state_symlinks_are_rejected_without_touching_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            external_dir = root / "external-dir"
+            external_dir.mkdir()
+            os.chmod(external_dir, 0o755)
+            linked_root = root / "linked-root"
+            linked_root.symlink_to(external_dir, target_is_directory=True)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录是符号链接"):
+                ic.load_imported(linked_root)
+            self.assertEqual(os.stat(external_dir).st_mode & 0o777, 0o755)
+            out = root / "out"
+            out.mkdir()
+            sentinel = root / "state-sentinel"
+            sentinel.write_text("state", encoding="utf-8")
+            os.chmod(sentinel, 0o644)
+            ic.imported_path(out).symlink_to(sentinel)
+            with self.assertRaisesRegex(ic.ImportError_, "状态文件是符号链接"):
+                ic.load_imported(out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "state")
+            self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+
+    def test_output_ancestor_symlink_is_rejected_without_touching_external_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            external = base / "external"
+            external.mkdir()
+            os.chmod(external, 0o755)
+            parent = base / "linked-parent"
+            parent.symlink_to(external, target_is_directory=True)
+            nested = parent / "nested"
+            with self.assertRaisesRegex(ic.ImportError_, "祖先是符号链接"):
+                ic.load_imported(nested)
+            self.assertFalse((external / "nested").exists())
+            self.assertEqual(os.stat(external).st_mode & 0o777, 0o755)
+
+    def test_output_root_ownership_guard_adopts_only_importer_directories(self) -> None:
+        conv = ("chatgpt", "owned", "title", "2026-08-01", [("user", None, "u", "visible")])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            broad = {Path("/").resolve(), Path.home().resolve(), Path.cwd().resolve(),
+                     ic.ROOT.resolve(), Path(tempfile.gettempdir()).resolve()}
+            for candidate in broad:
+                with self.subTest(broad=candidate.name or "root"):
+                    mode = os.stat(candidate).st_mode & 0o777
+                    with self.assertRaisesRegex(ic.ImportError_, "输出根目录过于宽泛"):
+                        ic.write_conversation(conv, {}, candidate)
+                    self.assertEqual(os.stat(candidate).st_mode & 0o777, mode)
+
+            unrelated = root / "unrelated"
+            unrelated.mkdir()
+            note = unrelated / "notes.txt"
+            note.write_text("unrelated", encoding="utf-8")
+            os.chmod(unrelated, 0o755)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是导入器目录"):
+                ic.write_conversation(conv, {}, unrelated)
+            self.assertEqual(os.stat(unrelated).st_mode & 0o777, 0o755)
+            self.assertEqual(note.read_text(encoding="utf-8"), "unrelated")
+            self.assertFalse(ic.imported_path(unrelated).exists())
+            self.assertFalse(list(unrelated.glob("*.md")))
+
+            file_root = root / "output-file"
+            file_root.write_text("file", encoding="utf-8")
+            os.chmod(file_root, 0o644)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是目录"):
+                ic.write_conversation(conv, {}, file_root)
+            self.assertEqual(file_root.read_text(encoding="utf-8"), "file")
+            self.assertEqual(os.stat(file_root).st_mode & 0o777, 0o644)
+
+            empty = root / "empty"
+            empty.mkdir()
+            self.assertEqual(ic.write_conversation(conv, {}, empty), "new")
+            self.assertEqual(os.stat(empty).st_mode & 0o777, 0o700)
+
+            state_dir = root / "state-dir"
+            imported = {}
+            self.assertEqual(ic.write_conversation(conv, imported, state_dir), "new")
+            ic.save_imported(imported, state_dir)
+            os.chmod(state_dir, 0o755)
+            self.assertEqual(ic.write_conversation(conv, imported, state_dir), "dup")
+            self.assertEqual(os.stat(state_dir).st_mode & 0o777, 0o700)
+
+            recovery = root / "recovery"
+            recovered_state = {}
+            self.assertEqual(ic.write_conversation(conv, recovered_state, recovery), "new")
+            ic.save_imported(recovered_state, recovery)
+            ic.imported_path(recovery).unlink()
+            self.assertEqual(ic.write_conversation(conv, {}, recovery), "dup")
+
+            isolated_input = root / "input"
+            isolated_input.mkdir()
+            (isolated_input / ".gitkeep").write_text("", encoding="utf-8")
+            with unittest.mock.patch.object(ic, "INPUT_DIR", isolated_input):
+                self.assertEqual(ic.load_imported(isolated_input), {})
+                self.assertEqual(ic.write_conversation(conv, {}, isolated_input), "new")
+
+    def test_output_root_state_never_authorizes_unmanaged_markdown(self) -> None:
+        conv = ("chatgpt", "owned", "title", "2026-08-01", [("user", None, "u", "visible")])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            valid_with_note = root / "valid-with-note"
+            valid_with_note.mkdir()
+            state = ic.imported_path(valid_with_note)
+            state.write_text("{}", encoding="utf-8")
+            note = valid_with_note / "notes.md"
+            note.write_text("ordinary note", encoding="utf-8")
+            os.chmod(valid_with_note, 0o755)
+            os.chmod(note, 0o644)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是导入器目录"):
+                ic.write_conversation(conv, {}, valid_with_note)
+            self.assertEqual(note.read_text(encoding="utf-8"), "ordinary note")
+            self.assertEqual(state.read_text(encoding="utf-8"), "{}")
+            self.assertEqual(os.stat(valid_with_note).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(note).st_mode & 0o777, 0o644)
+
+            corrupt_with_note = root / "corrupt-with-note"
+            corrupt_with_note.mkdir()
+            corrupt_state = ic.imported_path(corrupt_with_note)
+            corrupt_state.write_text("{broken", encoding="utf-8")
+            corrupt_note = corrupt_with_note / "notes.md"
+            corrupt_note.write_text("ordinary note", encoding="utf-8")
+            os.chmod(corrupt_with_note, 0o755)
+            os.chmod(corrupt_note, 0o644)
+            with self.assertRaisesRegex(ic.ImportError_, "输出根目录不是导入器目录"):
+                ic.load_imported(corrupt_with_note)
+            self.assertEqual(corrupt_state.read_text(encoding="utf-8"), "{broken")
+            self.assertEqual(corrupt_note.read_text(encoding="utf-8"), "ordinary note")
+            self.assertEqual(os.stat(corrupt_with_note).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(corrupt_note).st_mode & 0o777, 0o644)
+
+            managed = root / "managed"
+            self.assertEqual(ic.write_conversation(conv, {}, managed), "new")
+            managed_state = ic.imported_path(managed)
+            managed_state.write_text("{}", encoding="utf-8")
+            self.assertIn("chatgpt:owned", ic.load_imported(managed))
+            self.assertEqual(ic.write_conversation(conv, {}, managed), "dup")
+
+            managed_state.unlink()
+            self.assertEqual(ic.load_imported(managed), {})
+            self.assertEqual(ic.write_conversation(conv, {}, managed), "dup")
+
+    def test_default_local_zero_byte_sessions_are_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            zero = root / "zero.jsonl"
+            zero.write_bytes(b"")
+            roots = (("codex", str(root), "*.jsonl"),)
+            failures = []
+            self.assertEqual(ic.discover_local(roots=roots, failures=failures), [])
+            self.assertEqual(failures, [("—", ic.SKIP_EMPTY)])
+
+            def default_local_result(out: Path, selected_roots: tuple) -> tuple[int, str]:
+                stream = io.StringIO()
+                argv = ["import_chats.py", "--source", "local", "--root", str(out), "--dry-run"]
+                with (unittest.mock.patch.object(ic, "LOCAL_ROOTS", selected_roots),
+                      unittest.mock.patch.object(sys, "argv", argv),
+                      redirect_stdout(stream)):
+                    return ic.main(), stream.getvalue()
+
+            direct = ic.run_local([], unittest.mock.Mock(yes=True, dry_run=True), {}, Path(td) / "direct-out", [])
+            self.assertEqual(direct[-1], [("—", ic.SKIP_EMPTY)])
+            code, output = default_local_result(Path(td) / "zero-out", roots)
+            self.assertEqual(code, 1)
+            self.assertIn("无消息", output)
+
+            no_files = root / "no-files"
+            no_files.mkdir()
+            empty_roots = (("codex", str(no_files), "*.jsonl"),)
+            code, output = default_local_result(Path(td) / "empty-out", empty_roots)
+            self.assertEqual(code, 1)
+            self.assertIn("无消息", output)
+
+            code, output = default_local_result(Path(td) / "no-roots-out", ())
+            self.assertEqual(code, 1)
+            self.assertIn("无消息", output)
+
+            (root / "visible.jsonl").write_text(json.dumps({
+                "type": "response_item", "payload": {"type": "message", "role": "user",
+                                                             "content": [{"type": "input_text", "text": "visible"}]},
+            }), encoding="utf-8")
+            code, output = default_local_result(Path(td) / "mixed-out", roots)
+            self.assertEqual(code, 2)
+            self.assertIn("预计新导入 1", output)
+            self.assertIn("无消息", output)
+
+    def test_default_local_stat_failure_is_reported_and_mixed_batch_is_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            good = root / "good.jsonl"
+            bad = root / "private-name.jsonl"
+            record = {"timestamp": "2026-08-01T10:00:00Z", "type": "response_item",
+                      "payload": {"type": "message", "role": "user",
+                                  "content": [{"type": "input_text", "text": "visible"}]}}
+            good.write_text(json.dumps(record), encoding="utf-8")
+            bad.write_text(json.dumps(record), encoding="utf-8")
+            roots = (("codex", str(root), "*.jsonl"),)
+            original_stat = Path.stat
+
+            def failing_stat(path, *args, **kwargs):
+                if path == bad:
+                    raise OSError("private stat detail")
+                return original_stat(path, *args, **kwargs)
+
+            with unittest.mock.patch.object(Path, "stat", new=failing_stat):
+                failures = []
+                found = ic.discover_local(roots=roots, failures=failures)
+                self.assertEqual(len(found), 1)
+                self.assertEqual(failures, [("—", "本地会话状态读取失败")])
+                stream = io.StringIO()
+                argv = ["import_chats.py", "--source", "local", "--root", str(Path(td) / "out"), "--dry-run"]
+                with (unittest.mock.patch.object(ic, "LOCAL_ROOTS", roots),
+                      unittest.mock.patch.object(sys, "argv", argv),
+                      redirect_stdout(stream)):
+                    self.assertEqual(ic.main(), 2)
+            self.assertIn("本地会话状态读取失败", stream.getvalue())
+            self.assertIn("预计新导入 1", stream.getvalue())
+            self.assertNotIn("private-name", stream.getvalue())
+            self.assertNotIn("private stat detail", stream.getvalue())
+
+    def test_empty_root_is_rejected_not_silently_defaulted(self) -> None:
+        stream = io.StringIO()
+        argv = ["import_chats.py", "--source", "local", "--root", ""]
+        with (unittest.mock.patch.object(sys, "argv", argv),
+              redirect_stderr(stream)):
+            with self.assertRaises(SystemExit) as raised:
+                ic.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--root 不能为空字符串", stream.getvalue())
+
+    def test_zip_read_runtime_error_becomes_import_error(self) -> None:
+        fake = unittest.mock.MagicMock()
+        fake.__enter__.return_value = fake
+        fake.namelist.return_value = ["conversations.json"]
+        fake.read.side_effect = RuntimeError("encrypted")
+        with unittest.mock.patch("zipfile.ZipFile", return_value=fake):
+            with self.assertRaises(ic.ImportError_):
+                ic.parse_deepseek(Path("fake.zip"))
+
+    def test_local_cancellation_exits_without_report_or_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session = root / "rollout-c.jsonl"
+            session.write_text(json.dumps({"type": "session_meta", "payload": {"id": "c"}}), encoding="utf-8")
+            out = root / "out"
+            r = subprocess.run([sys.executable, "import_chats.py", "--source", "local", "--path", str(session),
+                                "--local-format", "codex", "--root", str(out)], input="n\n", text=True,
+                               capture_output=True, cwd=str(PROJECT_ROOT))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("已取消。", r.stdout)
+            self.assertNotIn("完成。", r.stdout)
+            self.assertNotIn("写入目录", r.stdout)
+            self.assertFalse(out.exists())
+
+    def test_collision_cli_reports_only_successful_outputs_and_partial_exit(self) -> None:
+        def conversation(cid: str, mid: str) -> dict:
+            return {"id": cid, "title": cid, "current_node": mid, "mapping": {
+                "root": {"parent": None, "children": [mid]},
+                mid: {"parent": "root", "children": [], "message": {
+                    "id": mid, "author": {"role": "user"}, "create_time": 1,
+                    "content": {"parts": ["正文"]},
+                }},
+            }}
+        with tempfile.TemporaryDirectory() as td:
+            export = Path(td) / "conversations-000.json"
+            export.write_text(json.dumps([conversation("a/b", "m1"), conversation("a?b", "m2")]),
+                              encoding="utf-8")
+            r = run_import("--source", "chatgpt", "--path", str(export),
+                           "--root", str(Path(td) / "out"), "--yes")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("原始 2 个会话，输出 1 个会话 → 新导入 1", r.stdout)
+        self.assertIn("解析/写入失败 1", r.stdout)
+
+    def test_same_key_cli_is_partial_and_reverse_markers_report_cleanly(self) -> None:
+        def conversation(cid: str, mid: str, text: str) -> dict:
+            return {"id": cid, "title": cid, "current_node": mid, "mapping": {
+                "root": {"parent": None, "children": [mid]},
+                mid: {"parent": "root", "children": [], "message": {
+                    "id": mid, "author": {"role": "user"}, "create_time": 1,
+                    "content": {"parts": [text]},
+                }},
+            }}
+        with tempfile.TemporaryDirectory() as td:
+            export = Path(td) / "conversations-000.json"
+            out = Path(td) / "out"
+            export.write_text(json.dumps([conversation("same", "m1", "first"),
+                                          conversation("same", "m2", "second")]), encoding="utf-8")
+            r = run_import("--source", "chatgpt", "--path", str(export), "--root", str(out), "--yes")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("批次内重复会话键", r.stdout)
+            self.assertIn("first", (out / "chatgpt-same.md").read_text(encoding="utf-8"))
+
+            reverse = out / "chatgpt-reverse.md"
+            reverse.write_text("<!-- source: chatgpt -->\n<!-- conversation_id: reverse -->\n"
+                               "<!-- distill-messages:end -->\nold\n<!-- distill-messages:begin -->\n",
+                               encoding="utf-8")
+            export.write_text(json.dumps([conversation("reverse", "m3", "replacement")]), encoding="utf-8")
+            reverse_run = run_import("--source", "chatgpt", "--path", str(export), "--root", str(out), "--yes")
+            self.assertEqual(reverse_run.returncode, 1, reverse_run.stdout + reverse_run.stderr)
+            self.assertIn("输出根目录不是导入器目录", reverse_run.stderr)
+            self.assertNotIn("Traceback", reverse_run.stderr)
+
+    def test_duplicate_restores_permissions_but_dry_run_is_write_free(self) -> None:
+        out = self._tmp()
+        conv = ("chatgpt", "private", "标题", "2026-08-01", [("user", None, "u", "正文")])
+        imported = {}
+        self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+        path = out / "chatgpt-private.md"
+        os.chmod(out, 0o755)
+        os.chmod(path, 0o644)
+        self.assertEqual(ic.write_conversation(conv, imported, out), "dup")
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        os.chmod(out, 0o755)
+        os.chmod(path, 0o644)
+        self.assertEqual(ic.write_conversation(conv, imported, out, dry_run=True), "dup")
+        self.assertEqual(os.stat(out).st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+
+    def test_atomic_write_forces_tmp_permissions_before_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "private.md"
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text("old", encoding="utf-8")
+            os.chmod(tmp, 0o777)
+            with unittest.mock.patch("os.fchmod", wraps=os.fchmod) as fchmod:
+                ic._atomic_write(path, "new")
+            self.assertTrue(any(call.args[1] == 0o600 for call in fchmod.call_args_list))
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_atomic_write_ignores_predictable_tmp_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "private.md"
+            sentinel = root / "sentinel"
+            sentinel.write_text("outside", encoding="utf-8")
+            path.with_name(path.name + ".tmp").symlink_to(sentinel)
+            ic._atomic_write(path, "inside")
+            self.assertEqual(path.read_text(encoding="utf-8"), "inside")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+
+    def test_atomic_write_cleans_unique_tmp_when_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "private.md"
+            with unittest.mock.patch("os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(ic.ImportError_, "无法安全替换输出文件"):
+                    ic._atomic_write(path, "inside")
+            self.assertEqual(list(Path(td).glob(".private.md.*.tmp")), [])
+
+    def test_atomic_write_never_chmods_a_target_swapped_after_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path, outside = root / "private.md", root / "outside"
+            outside.write_text("outside", encoding="utf-8")
+            os.chmod(outside, 0o644)
+            real_replace = os.replace
+            def replace_then_swap(src, dst, **kwargs):
+                real_replace(src, dst, **kwargs)
+                path.unlink()
+                path.symlink_to(outside)
+            with unittest.mock.patch("os.replace", side_effect=replace_then_swap):
+                ic._atomic_write(path, "inside")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(outside).st_mode & 0o777, 0o644)
+
+    def test_atomic_write_holds_parent_fd_when_path_is_swapped_before_temp_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out, outside = root / "out", root / "outside"
+            out.mkdir(); outside.mkdir()
+            sentinel = outside / "sentinel"
+            sentinel.write_text("outside", encoding="utf-8")
+            os.chmod(outside, 0o755); os.chmod(sentinel, 0o644)
+            relocated = root / "relocated"
+            real_ensure = ic._ensure_safe_directory
+            def ensure_then_swap(path, mode):
+                real_ensure(path, mode)
+                out.rename(relocated)
+                out.symlink_to(outside, target_is_directory=True)
+            conv = ("chatgpt", "safe", "title", "2026-08-01", [("user", None, "m", "body")])
+            with unittest.mock.patch.object(ic, "_ensure_safe_directory", side_effect=ensure_then_swap):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(conv, {}, out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+            self.assertEqual(os.stat(outside).st_mode & 0o777, 0o755)
+            self.assertFalse((outside / "chatgpt-safe.md").exists())
+
+    def test_safe_directory_fd_rejects_intermediate_ancestor_symlink_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            trusted, outside = root / "trusted", root / "outside"
+            trusted.mkdir(); outside.mkdir()
+            middle, held = trusted / "middle", trusted / "held"
+            middle.mkdir()
+            sentinel = outside / "sentinel"; sentinel.write_text("outside", encoding="utf-8")
+            real_open = os.open
+            def swap_before_open(name, flags, *args, **kwargs):
+                if name == "middle" and kwargs.get("dir_fd") is not None and middle.exists():
+                    middle.rename(held)
+                    middle.symlink_to(outside, target_is_directory=True)
+                return real_open(name, flags, *args, **kwargs)
+            with unittest.mock.patch("os.open", side_effect=swap_before_open):
+                with self.assertRaises(ic.ImportError_):
+                    ic._safe_directory_fd(middle / "leaf")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertFalse((outside / "leaf").exists())
+
+    def test_duplicate_safe_regular_fd_rejects_parent_swapped_after_collision_check(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out, outside, held = root / "out", root / "outside", root / "held"
+            outside.mkdir()
+            conv = ("chatgpt", "same", "title", "2026-08-01", [("user", None, "m", "body")])
+            imported = {}
+            self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+            external = outside / "chatgpt-same.md"
+            external.write_text("outside", encoding="utf-8")
+            os.chmod(external, 0o644)
+            real_check = ic._assert_no_filename_collision
+            def check_then_swap(*args, **kwargs):
+                real_check(*args, **kwargs)
+                out.rename(held)
+                out.symlink_to(outside, target_is_directory=True)
+            with unittest.mock.patch.object(ic, "_assert_no_filename_collision", side_effect=check_then_swap):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(conv, imported, out)
+            self.assertEqual(external.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(external).st_mode & 0o777, 0o644)
+
+    def test_new_output_directory_creation_rejects_ancestor_swapped_after_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stage, outside, held = root / "stage", root / "outside", root / "held"
+            stage.mkdir(); outside.mkdir()
+            sentinel = outside / "sentinel"
+            sentinel.write_text("outside", encoding="utf-8")
+            os.chmod(outside, 0o755); os.chmod(sentinel, 0o644)
+            out = stage / "new-output"
+            conv = ("chatgpt", "safe", "title", "2026-08-01", [("user", None, "m", "body")])
+            real_check = ic._assert_no_filename_collision
+            def check_then_swap(*args, **kwargs):
+                real_check(*args, **kwargs)
+                stage.rename(held)
+                stage.symlink_to(outside, target_is_directory=True)
+            with unittest.mock.patch.object(ic, "_assert_no_filename_collision", side_effect=check_then_swap):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(conv, {}, out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+            self.assertFalse((outside / "new-output").exists())
+
+    def test_main_redacts_unexpected_oserror_details(self) -> None:
+        stderr = io.StringIO()
+        with unittest.mock.patch.object(ic, "load_imported", side_effect=OSError("secret-path/private-detail")), \
+                unittest.mock.patch.object(sys, "argv", ["import_chats.py", "--source", "chatgpt", "--path", "x"]), \
+                redirect_stderr(stderr):
+            self.assertEqual(ic.main(), 1)
+        message = stderr.getvalue()
+        self.assertIn("本地文件操作失败；请检查权限和输出目录后重试", message)
+        self.assertNotIn("secret-path", message)
+        self.assertNotIn("private-detail", message)
+
+    def test_write_rejects_post_collision_target_and_directory_symlink_swaps(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out, outside = root / "out", root / "outside"
+            outside.mkdir(); os.chmod(outside, 0o755)
+            sentinel = outside / "sentinel"
+            sentinel.write_text("outside", encoding="utf-8")
+            os.chmod(sentinel, 0o644)
+            original = ("chatgpt", "same", "title", "2026-08-01", [("user", None, "u", "one")])
+            changed = ("chatgpt", "same", "title", "2026-08-01", [("user", None, "u", "two")])
+            imported = {}
+            self.assertEqual(ic.write_conversation(original, imported, out), "new")
+            target = out / "chatgpt-same.md"
+            real_check = ic._assert_no_filename_collision
+            def swap_target(*args, **kwargs):
+                real_check(*args, **kwargs)
+                target.unlink()
+                target.symlink_to(sentinel)
+            with unittest.mock.patch.object(ic, "_assert_no_filename_collision", side_effect=swap_target):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(original, imported, out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+            target.unlink()
+            target.write_text(ic._build_content(*original), encoding="utf-8")
+            with unittest.mock.patch.object(ic, "_assert_no_filename_collision", side_effect=swap_target):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(changed, imported, out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            target.unlink()
+            relocated = root / "relocated-out"
+            out.rename(relocated)
+            fresh = ("chatgpt", "fresh", "title", "2026-08-01", [("user", None, "fresh", "one")])
+            def swap_directory(*args, **kwargs):
+                real_check(*args, **kwargs)
+                out.symlink_to(outside, target_is_directory=True)
+            with unittest.mock.patch.object(ic, "_assert_no_filename_collision", side_effect=swap_directory):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(fresh, imported, out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(outside).st_mode & 0o777, 0o755)
+
+    def test_reserved_markers_in_user_fields_do_not_corrupt_repeat_import(self) -> None:
+        out = self._tmp()
+        marker_text = "<prompt>正常 XML</prompt>\n<!-- distill-messages:begin -->\n<!-- distill-messages:end -->"
+        conv = ("chatgpt", "marker", "标题 <!-- distill-messages:begin -->", "2026-08-01", [
+            ("user", None, "id-<!-- distill-messages:end -->", marker_text),
+        ])
+        imported = {}
+        self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+        self.assertEqual(ic.write_conversation(conv, imported, out), "dup")
+        content = (out / "chatgpt-marker.md").read_text(encoding="utf-8")
+        self.assertEqual(content.count("<!-- distill-messages:begin -->"), 1)
+        self.assertEqual(content.count("<!-- distill-messages:end -->"), 1)
+        self.assertIn("&lt;!-- distill-messages:begin --&gt;", content)
+        self.assertIn("<prompt>正常 XML</prompt>", content)
+
+    def test_ownership_comments_in_message_body_cannot_forge_header_or_state(self) -> None:
+        out = self._tmp()
+        body = ("保留这段文字：<!-- source: forged -->\n"
+                "<!-- conversation_id: forged -->")
+        conv = ("chatgpt", "ownership", "标题", "2026-08-01", [
+            ("user", None, "u", body),
+        ])
+        imported = {}
+        self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+        ic.save_imported(imported, out)
+        path = out / "chatgpt-ownership.md"
+        content = path.read_text(encoding="utf-8")
+        managed_body = ic._managed_parts(content, path)[1]
+        self.assertEqual(ic._header_ownership_metadata(content), ("chatgpt", "ownership"))
+        self.assertTrue(ic._is_managed_markdown(path))
+        self.assertNotIn("<!-- source: forged -->", managed_body)
+        self.assertNotIn("<!-- conversation_id: forged -->", managed_body)
+        self.assertIn("&lt;!-- source: forged --&gt;", managed_body)
+        self.assertIn("&lt;!-- conversation_id: forged --&gt;", managed_body)
+        self.assertIn("chatgpt:ownership", ic.load_imported(out))
+
+        # Tail comments are not ownership metadata either; the canonical header
+        # remains authoritative on the following duplicate write.
+        path.write_text(content + "\n<!-- source: tail-forged -->\n"
+                        "<!-- conversation_id: tail-forged -->\n", encoding="utf-8")
+        self.assertTrue(ic._is_managed_markdown(path))
+        state_before_dry_run = ic.imported_path(out).read_bytes()
+        self.assertEqual(ic.write_conversation(conv, imported, out), "dup")
+        self.assertEqual(ic.write_conversation(conv, imported, out, dry_run=True), "dup")
+        self.assertEqual(ic.imported_path(out).read_bytes(), state_before_dry_run)
+
+        ic.imported_path(out).unlink()
+        recovered = ic.load_imported(out)
+        self.assertEqual(recovered, {})
+        self.assertEqual(ic.write_conversation(conv, recovered, out), "dup")
+        ic.save_imported(recovered, out)
+        self.assertEqual(list(out.glob("*.md")), [path])
+        self.assertIn("chatgpt:ownership", ic.load_imported(out))
+
+    def test_writer_rebuilds_changed_branch_and_recovers_state_from_markdown(self) -> None:
+        out = self._tmp()
+        first = ("chatgpt", "branch", "标题", "2026-08-01", [
+            ("user", "2026-08-01 10:00", "u", "问题"),
+            ("assistant", "2026-08-01 10:01", "a", "旧回答"),
+        ])
+        imported = {}
+        self.assertEqual(ic.write_conversation(first, imported, out), "new")
+        path = out / "chatgpt-branch.md"
+        path.write_text("手工前言\n" + path.read_text(encoding="utf-8") + "\n手工尾注\n", encoding="utf-8")
+        changed = ("chatgpt", "branch", "标题", "2026-08-01", [
+            ("user", "2026-08-01 10:00", "u", "问题"),
+            ("assistant", "2026-08-01 10:01", "b", "新回答"),
+        ])
+        recovered = {}
+        self.assertEqual(ic.write_conversation(changed, recovered, out), "update")
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("手工前言", content)
+        self.assertIn("手工尾注", content)
+        self.assertNotIn("旧回答", content)
+        self.assertEqual(recovered["chatgpt:branch"]["message_ids"], ["u", "b"])
+
+    def test_writer_rejects_corrupt_markers_and_duplicate_ids(self) -> None:
+        out = self._tmp()
+        out.mkdir()
+        p = out / "chatgpt-x.md"
+        p.write_text("<!-- distill-messages:begin -->\n坏文件", encoding="utf-8")
+        conv = ("chatgpt", "x", "标题", "2026-08-01", [("user", None, "same", "一")])
+        with self.assertRaises(ic.ImportError_):
+            ic.write_conversation(conv, {}, out)
+        duplicate = ("chatgpt", "dup", "标题", "2026-08-01", [
+            ("user", None, "same", "一"), ("assistant", None, "same", "二")])
+        with self.assertRaises(ic.ImportError_):
+            ic.write_conversation(duplicate, {}, out)
+
+    def test_corrupt_imported_state_fails_closed(self) -> None:
+        out = self._tmp()
+        out.mkdir()
+        ic.imported_path(out).write_text("{bad", encoding="utf-8")
+        r = run_import("--source", "chatgpt", "--path", str(FIXTURE / "chatgpt"),
+                       "--root", str(out), "--yes")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(ic.imported_path(out).read_text(encoding="utf-8"), "{bad")
+
+    def test_imported_state_rejects_malformed_entries_without_rewriting(self) -> None:
+        cases = [
+            {"broken": 1},
+            {":cid": {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": []}},
+            {"chatgpt:": {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": []}},
+            {"chatgpt:x": {"path": 3, "imported_at": "2026-08-01", "title": "x", "message_ids": []}},
+            {"chatgpt:x": {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": ["m", "m"]}},
+        ]
+        for data in cases:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as td:
+                out = Path(td)
+                raw = json.dumps(data, ensure_ascii=False)
+                ic.imported_path(out).write_text(raw, encoding="utf-8")
+                with self.assertRaises(ic.ImportError_):
+                    ic.load_imported(out)
+                self.assertEqual(ic.imported_path(out).read_text(encoding="utf-8"), raw)
+
+    def test_next_run_rebuilds_missing_state_from_existing_markdown(self) -> None:
+        out = self._tmp()
+        args = ["--source", "chatgpt", "--path", str(FIXTURE / "chatgpt"),
+                "--root", str(out), "--yes"]
+        self.assertEqual(run_import(*args).returncode, 0)
+        ic.imported_path(out).unlink()  # simulate interruption after Markdown replacement
+        rerun = run_import(*args)
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        self.assertIn("重复 1", rerun.stdout)
+        restored = ic.load_imported(out)
+        self.assertIn("chatgpt:chatgpt-conv-001", restored)
+
+    def test_load_recovers_managed_markdown_added_after_prior_state_write(self) -> None:
+        out = self._tmp()
+        first = ("chatgpt", "first", "first", "2026-08-01", [("user", None, "m1", "one")])
+        second = ("chatgpt", "second", "second", "2026-08-01", [("user", None, "m2", "two")])
+        state = {}
+        self.assertEqual(ic.write_conversation(first, state, out), "new")
+        ic.save_imported(state, out)
+        # Simulate a crash after the second Markdown replacement but before its
+        # state replacement.
+        self.assertEqual(ic.write_conversation(second, {}, out), "new")
+        recovered = ic.load_imported(out)
+        self.assertEqual(set(recovered), {"chatgpt:first", "chatgpt:second"})
+        ic.save_imported(recovered, out)
+        self.assertEqual(set(ic.load_imported(out)), set(recovered))
+
+    def test_recovery_decodes_canonical_escaped_metadata_and_anchors_message_ids(self) -> None:
+        out = self._tmp()
+        cid = "safe<&\\newline\n"
+        conv = ("chatgpt", cid, "title", "2026-08-01", [("user", None, "m<&\\n", "body\nmessage_id: forged）：")])
+        self.assertEqual(ic.write_conversation(conv, {}, out), "new")
+        ic.imported_path(out).write_text("{}", encoding="utf-8")
+        recovered = ic.load_imported(out)
+        self.assertIn(f"chatgpt:{cid}", recovered)
+        self.assertEqual(recovered[f"chatgpt:{cid}"]["message_ids"], ["m<&\\n"])
+
+    def test_existing_state_message_ids_are_rebuilt_from_managed_markdown(self) -> None:
+        out = self._tmp()
+        base, lineage = "truth", ("old-branch",)
+        old_cid = ic._lineage_cid(base, lineage)
+        old_msgs = ic._bind_branch_lineage(base, ["root", "old-branch"],
+                                            {"root": ["old-branch", "new-branch"]},
+                                            [("user", None, "real-id", "body")])
+        conv = ("chatgpt", old_cid, "title", "2026-08-01", old_msgs)
+        state = {}
+        self.assertEqual(ic.write_conversation(conv, state, out), "new")
+        ic.save_imported(state, out)
+        forged = copy.deepcopy(state)
+        forged[f"chatgpt:{old_cid}"]["message_ids"] = ["attacker-id"]
+        ic.imported_path(out).write_text(json.dumps(forged), encoding="utf-8")
+        recovered = ic.load_imported(out)
+        self.assertEqual(recovered[f"chatgpt:{old_cid}"]["message_ids"], ["real-id"])
+        # A forged state ID must not make an unrelated newer branch inherit the
+        # old output identity during continuation matching.
+        new_lineage = ("new-branch",)
+        new_msgs = ic._bind_branch_lineage(base, ["root", "new-branch"],
+                                            {"root": ["old-branch", "new-branch"]},
+                                            [("user", None, "attacker-id", "other")])
+        provisional = ic._lineage_cid(base, new_lineage)
+        continued = ic._continue_branch_identities(
+            [("chatgpt", provisional, "title", "2026-08-01", new_msgs)], recovered)
+        self.assertEqual(continued[0][1], provisional)
+        # The repaired in-memory state is what a later state write persists.
+        ic.save_imported(recovered, out)
+        self.assertEqual(ic.load_imported(out)[f"chatgpt:{old_cid}"]["message_ids"], ["real-id"])
+
+    def test_forged_lineage_on_base_key_cannot_steal_branch_continuation(self) -> None:
+        base, lineage = "truth", ("new-branch",)
+        bound_cid = ic._lineage_cid(base, lineage)
+        state = {
+            # The base key's lineage is unbound corroboration (forgivable);
+            # the bound branch key is the hash-authenticated identity for
+            # this lineage and must win the disambiguation.
+            f"chatgpt:{base}": {"path": "truth.md", "imported_at": "2026-08-01", "title": "x",
+                                "message_ids": ["shared-id"], "branch_base": base,
+                                "branch_lineage": list(lineage)},
+            f"chatgpt:{bound_cid}": {"path": "new.md", "imported_at": "2026-08-01", "title": "x",
+                                     "message_ids": ["shared-id"], "branch_base": base,
+                                     "branch_lineage": list(lineage)},
+        }
+        msgs = ic._bind_branch_lineage(base, ["root", "new-branch"],
+                                       {"root": ["old-branch", "new-branch"]},
+                                       [("user", None, "shared-id", "body")])
+        continued = ic._continue_branch_identities(
+            [("chatgpt", ic._lineage_cid(base, ("provisional",)), "title", "2026-08-01", msgs)], state)
+        self.assertEqual(continued[0][1], bound_cid)
+
+    def test_base_entry_lineage_remains_continuation_target_as_sole_match(self) -> None:
+        base, lineage = "truth", ("new-branch",)
+        state = {
+            # The base key legitimately carries this lineage from a previous
+            # continuation; no bound branch key matches it, so it must still
+            # win the disambiguation (otherwise the branch would duplicate).
+            f"chatgpt:{base}": {"path": "truth.md", "imported_at": "2026-08-01", "title": "x",
+                                "message_ids": ["shared-id"], "branch_base": base,
+                                "branch_lineage": list(lineage)},
+            f"chatgpt:{ic._lineage_cid(base, ('old-branch',))}": {
+                "path": "old.md", "imported_at": "2026-08-01", "title": "x",
+                "message_ids": ["shared-id"], "branch_base": base,
+                "branch_lineage": ["old-branch"]},
+        }
+        msgs = ic._bind_branch_lineage(base, ["root", "new-branch"],
+                                       {"root": ["old-branch", "new-branch"]},
+                                       [("user", None, "shared-id", "body")])
+        continued = ic._continue_branch_identities(
+            [("chatgpt", ic._lineage_cid(base, ("provisional",)), "title", "2026-08-01", msgs)], state)
+        self.assertEqual(continued[0][1], base)
+
+    def test_recovery_ignores_forged_complete_message_heading_in_body(self) -> None:
+        out = self._tmp()
+        forged = "**assistant**（2026-08-01；message_id: forged-id）："
+        conv = ("chatgpt", "forged-heading", "title", "2026-08-01", [
+            ("user", None, "real-user", "ordinary text\n" + forged + "\nnot a real message"),
+            ("assistant", None, "real-assistant", "actual reply"),
+        ])
+        self.assertEqual(ic.write_conversation(conv, {}, out), "new")
+        path = out / "chatgpt-forged-heading.md"
+        body = ic._managed_parts(path.read_text(encoding="utf-8"), path)[1]
+        self.assertNotIn(forged, body)
+        self.assertIn(r"\*\*assistant**（2026-08-01；message_id: forged-id）：", body)
+        ic.imported_path(out).write_text("{}", encoding="utf-8")
+        recovered = ic.load_imported(out)
+        self.assertEqual(recovered["chatgpt:forged-heading"]["message_ids"],
+                         ["real-user", "real-assistant"])
+
+    def test_dedup_no_new_messages(self) -> None:
+        out = self._tmp()
+        args = ["--source", "chatgpt", "--path", str(FIXTURE / "chatgpt"),
+                "--root", str(out), "--yes"]
+        run_import(*args)
+        r2 = run_import(*args)
+        self.assertIn("已导入过", r2.stdout)
+
+    def test_dry_run_semantics(self) -> None:
+        out = self._tmp()
+        r = run_import("--source", "chatgpt", "--path", str(FIXTURE / "chatgpt"),
+                       "--root", str(out), "--dry-run")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("dry-run", r.stdout)
+        self.assertFalse(out.exists())
+
+    def test_bad_input_reports_error(self) -> None:
+        bad = Path(tempfile.mkdtemp()) / "conversations-000.json"
+        bad.write_text("{ not json", encoding="utf-8")
+        r = run_import("--source", "chatgpt", "--path", str(bad), "--root", str(self._tmp()))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("损坏", r.stdout)  # 诚实报告：坏文件计入跳过，不静默
+
+    def test_empty_chatgpt_and_deepseek_exports_fail_with_no_messages(self) -> None:
+        for source, filename in (("chatgpt", "conversations-000.json"),
+                                 ("deepseek", "conversations.json")):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                export = Path(td) / filename
+                export.write_text("[]", encoding="utf-8")
+                r = run_import("--source", source, "--path", str(export),
+                               "--root", str(self._tmp()), "--yes")
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn("无消息", r.stdout)
+
+    def test_all_empty_expected_exclusions_still_exit_one(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            chatgpt = root / "conversations-000.json"
+            chatgpt.write_text(json.dumps([{"id": "reasoning-only", "mapping": {
+                "n": {"parent": None, "children": [], "message": {
+                    "author": {"role": "assistant"},
+                    "content": {"content_type": "reasoning", "parts": ["internal"]}}},
+            }}]), encoding="utf-8")
+            r = run_import("--source", "chatgpt", "--path", str(chatgpt),
+                           "--root", str(root / "chat-out"), "--yes")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("预期内部内容排除 1 个片段", r.stdout)
+            self.assertIn("无消息", r.stdout)
+
+            for local_format, record in (
+                ("codex", {"type": "session_meta", "payload": {"id": "internal"}}),
+                ("claude", {"type": "system", "payload": {}}),
+            ):
+                with self.subTest(local_format=local_format):
+                    session = root / f"{local_format}.jsonl"
+                    session.write_text(json.dumps(record), encoding="utf-8")
+                    r = run_import("--source", "local", "--path", str(session),
+                                   "--local-format", local_format, "--root", str(root / f"{local_format}-out"),
+                                   "--dry-run")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn("预期内部内容排除 1 个片段", r.stdout)
+                    self.assertIn("解析/写入失败 1：无消息", r.stdout)
+
+    def test_mixed_local_visible_and_internal_only_sessions_exit_two(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            (root / "internal.jsonl").write_text(json.dumps({
+                "type": "session_meta", "payload": {"id": "internal"},
+            }), encoding="utf-8")
+            (root / "visible.jsonl").write_text(json.dumps({
+                "type": "response_item", "payload": {"type": "message", "role": "user",
+                                                             "content": [{"type": "input_text", "text": "visible"}]},
+            }), encoding="utf-8")
+            out = Path(td) / "out"
+            r = run_import("--source", "local", "--path", str(root), "--local-format", "codex",
+                           "--root", str(out), "--dry-run")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("预计新导入 1", r.stdout)
+            self.assertIn("预期内部内容排除 1 个片段", r.stdout)
+            self.assertIn("解析/写入失败 1：无消息", r.stdout)
+            self.assertFalse(out.exists())
+
+    def test_non_dict_chatgpt_and_deepseek_items_fail_without_traceback(self) -> None:
+        for source, filename in (("chatgpt", "conversations-000.json"),
+                                 ("deepseek", "conversations.json")):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                export = Path(td) / filename
+                export.write_text("[null]", encoding="utf-8")
+                r = run_import("--source", source, "--path", str(export),
+                               "--root", str(self._tmp()), "--yes")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("会话条目结构损坏", r.stdout)
+                self.assertNotIn("Traceback", r.stderr)
+
+    def test_deepseek_malformed_fragment_is_partial_cli_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            export = Path(td) / "conversations.json"
+            export.write_text(json.dumps([
+                {"id": "valid", "mapping": {"m": {"parent": None, "children": [], "message": {
+                    "fragments": [{"type": "REQUEST", "content": "visible"}],
+                }}}},
+                {"id": "bad", "mapping": {"m": {"parent": None, "children": [], "message": {
+                    "fragments": [{"type": "FILE", "files": [{"file_id": {"opaque": 1}}]}],
+                }}}},
+            ], ensure_ascii=False), encoding="utf-8")
+            r = run_import("--source", "deepseek", "--path", str(export),
+                           "--root", str(Path(td) / "out"), "--yes")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("原始 2 个会话，输出 1 个会话", r.stdout)
+        self.assertIn("附件元数据结构损坏", r.stdout)
+
+    def test_chatgpt_unknown_part_is_partial_cli_failure(self) -> None:
+        def conversation(cid: str, part) -> dict:
+            return {"id": cid, "title": cid, "current_node": "m", "mapping": {
+                "m": {"parent": None, "children": [], "message": {
+                    "id": "m", "author": {"role": "user"}, "create_time": 1,
+                    "content": {"parts": [part]},
+                }},
+            }}
+        with tempfile.TemporaryDirectory() as td:
+            export = Path(td) / "conversations-000.json"
+            export.write_text(json.dumps([conversation("good", "visible"),
+                                          conversation("unknown", {"opaque": 1})]), encoding="utf-8")
+            r = run_import("--source", "chatgpt", "--path", str(export),
+                           "--root", str(Path(td) / "out"), "--yes")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("原始 2 个会话，输出 2 个会话", r.stdout)
+        self.assertIn("未识别 ChatGPT 附件", r.stdout)
+
+    def test_utf8_decode_failures_are_strict_and_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            gemini = root / "我的活动记录.html"
+            gemini.write_bytes(b"\xff")
+            with self.assertRaisesRegex(ic.ImportError_, "Gemini HTML UTF-8 解码失败"):
+                ic.parse_gemini(gemini)
+            r = run_import("--source", "gemini", "--path", str(gemini),
+                           "--root", str(root / "gemini-out"), "--yes")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("UTF-8", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+
+            for source, parser in (("codex", ic.parse_codex), ("claude", ic.parse_claude)):
+                with self.subTest(source=source):
+                    session = root / f"{source}.jsonl"
+                    session.write_bytes(b"\xff\n")
+                    with self.assertRaisesRegex(ic.ImportError_, "UTF-8 解码失败"):
+                        parser(session, [])
+                    forced = run_import("--source", "local", "--path", str(session),
+                                        "--local-format", source, "--root", str(root / f"{source}-out"),
+                                        "--dry-run", "--yes")
+                    self.assertEqual(forced.returncode, 1, forced.stdout + forced.stderr)
+                    self.assertIn("UTF-8", forced.stdout)
+                    self.assertNotIn("Traceback", forced.stderr)
+
+            auto = run_import("--source", "local", "--path", str(root / "codex.jsonl"),
+                              "--local-format", "auto", "--root", str(root / "auto-out"),
+                              "--dry-run", "--yes")
+            self.assertEqual(auto.returncode, 1, auto.stdout + auto.stderr)
+            self.assertIn("无法识别本地 JSONL", auto.stdout)
+            self.assertNotIn("Traceback", auto.stderr)
+
+    def test_local_dry_run_fixture_roots(self) -> None:
+        codex_root = FIXTURE / "codex" / "sessions"
+        found = ic.discover_local(roots=(("codex", str(codex_root), "rollout-*.jsonl"),))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][1], "fake-session-001")
+
+    def test_confirmation_cancels_without_yes(self) -> None:
+        out = self._tmp()
+        codex_file = (FIXTURE / "codex" / "sessions" / "2026" / "08" / "01"
+                      / "rollout-2026-08-01T10-00-00-fake-session-001.jsonl")
+        found = [("codex", "fake-session-001", "标题", "2026-08-01 10:00",
+                  "2026-08-01 10:00", 100, str(codex_file))]
+        with unittest.mock.patch("builtins.input", return_value="n"):
+            ident, outputs, new, updated, dup, bad = ic.run_local(found, unittest.mock.Mock(yes=False, dry_run=False),
+                                                                    {}, out)
+        self.assertEqual(new + updated, 0)
+        self.assertFalse(out.exists())
+
+    def test_local_path_auto_classifies_once_and_dry_run_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            codex = root / "rollout-c.jsonl"
+            codex.write_text("\n".join([
+                json.dumps({"type": "session_meta", "payload": {"id": "c"}}),
+                json.dumps({"timestamp": "2026-08-01T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}}),
+            ]), encoding="utf-8")
+            claude = root / "claude.jsonl"
+            claude.write_text(json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "hello"}}), encoding="utf-8")
+            unknown = root / "unknown.jsonl"
+            unknown.write_text(json.dumps({"what": "ever"}), encoding="utf-8")
+            out = Path(td) / "out"
+            r = run_import("--source", "local", "--path", str(root), "--root", str(out), "--dry-run")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("预计新导入 2", r.stdout)
+            self.assertIn("解析/写入失败 1", r.stdout)
+            self.assertFalse(out.exists())
+
+    def test_local_auto_skips_known_claude_preamble_before_classifying(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            session = root / "claude.jsonl"
+            session.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "file-history-snapshot", "payload": {}},
+                {"type": "user", "uuid": "u", "message": {"role": "user", "content": "真实内容"}},
+            ]), encoding="utf-8")
+            r = run_import("--source", "local", "--path", str(root), "--root", str(Path(td) / "out"),
+                           "--dry-run")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("预计新导入 1", r.stdout)
+
+    def test_nonexistent_or_empty_local_path_is_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "missing"
+            empty = Path(td) / "empty"
+            not_jsonl = Path(td) / "notes.txt"
+            empty.mkdir()
+            not_jsonl.write_text("not a session", encoding="utf-8")
+            for path, expected in ((missing, "本地路径不存在"), (empty, "本地路径未包含 JSONL 会话"),
+                                   (not_jsonl, "本地路径不是 JSONL 会话")):
+                with self.subTest(path=path):
+                    r = run_import("--source", "local", "--path", str(path),
+                                   "--root", str(Path(td) / "out"), "--dry-run")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(expected, r.stdout)
+
+    def test_local_dry_run_claims_paths_and_reports_same_source_collisions(self) -> None:
+        out = self._tmp()
+        for source, parser_name in (("codex", "parse_codex"), ("claude", "parse_claude")):
+            with self.subTest(source=source):
+                first = (source, "a/b", "first", "2026-08-01", [("user", None, "u1", "one")])
+                second = (source, "a?b", "second", "2026-08-01", [("user", None, "u2", "two")])
+                found = [
+                    (source, "first-session", "first", None, None, 1, "first.jsonl"),
+                    (source, "second-session", "second", None, None, 1, "second.jsonl"),
+                ]
+                args = unittest.mock.Mock(yes=True, dry_run=True)
+                with unittest.mock.patch.object(ic, parser_name, side_effect=[[first], [second]]):
+                    total, outputs, new, updated, dup, bad = ic.run_local(found, args, {}, out)
+                self.assertEqual((total, outputs, new, updated, dup), (2, 1, 1, 0, 0))
+                self.assertEqual(len(bad), 1)
+                self.assertIn("文件名冲突", bad[0][1])
+        self.assertFalse(out.exists())
+
+    def test_local_batch_duplicate_key_is_rejected_before_second_write(self) -> None:
+        out = self._tmp()
+        first = ("codex", "same", "first", "2026-08-01", [("user", None, "u1", "first")])
+        second = ("codex", "same", "second", "2026-08-01", [("user", None, "u2", "second")])
+        found = [
+            ("codex", "one", "first", None, None, 1, "one.jsonl"),
+            ("codex", "two", "second", None, None, 1, "two.jsonl"),
+        ]
+        args = unittest.mock.Mock(yes=True, dry_run=False)
+        with unittest.mock.patch.object(ic, "parse_codex", side_effect=[[first], [second]]):
+            total, outputs, new, updated, dup, bad = ic.run_local(found, args, {}, out)
+        self.assertEqual((total, outputs, new, updated, dup), (2, 1, 1, 0, 0))
+        self.assertEqual(len(bad), 1)
+        self.assertIn("批次内重复会话键", bad[0][1])
+        self.assertIn("first", (out / "codex-same.md").read_text(encoding="utf-8"))
+
+    def test_local_report_separates_expected_exclusions_from_bad_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "sessions"
+            root.mkdir()
+            session = root / "rollout-report.jsonl"
+            session.write_text("\n".join([
+                json.dumps({"type": "session_meta", "payload": {"id": "report"}}),
+                "{ malformed",
+                json.dumps({"timestamp": "2026-08-01T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# Files mentioned by the user:\n<path>/x</path>"}]}}),
+                json.dumps({"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "真实问题"}]}}),
+            ]), encoding="utf-8")
+            out = Path(td) / "out"
+            r = run_import("--source", "local", "--path", str(root), "--local-format", "codex",
+                           "--root", str(out), "--dry-run")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("预期内部内容排除 2 个片段", r.stdout)
+            self.assertIn("解析/写入失败 1", r.stdout)
+            self.assertFalse(out.exists())
+
+    def test_report_aggregates_failure_reasons_without_raw_private_refs(self) -> None:
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            ic.print_report(2, 1, 1, 0, 0, [
+                ("private-title-secret-123", "结构损坏"),
+                ("another-private-ref", "结构损坏"),
+            ], "chatgpt", False)
+        report = stream.getvalue()
+        self.assertIn("解析/写入失败 2", report)
+        self.assertIn("结构损坏 ×2", report)
+        self.assertNotIn("private-title-secret-123", report)
+        self.assertNotIn("another-private-ref", report)
+
+    def test_collision_report_uses_generic_reason_without_secret_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            secret = "collision-secret"
+            first = ("chatgpt", f"{secret}/a", secret, "2026-08-01", [("user", None, "u1", "one")])
+            second = ("chatgpt", f"{secret}?a", secret, "2026-08-01", [("user", None, "u2", "two")])
+            result = ic.import_convs([first, second], [], 2, {}, out, dry_run=False)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(*result, source="chatgpt", dry_run=False)
+            report = stream.getvalue()
+            self.assertIn("文件名冲突：目标文件已被其他会话占用", report)
+            self.assertNotIn(secret, report)
+
+    def test_invalid_utf8_imported_state_fails_without_output_write(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            out.mkdir()
+            state = ic.imported_path(out)
+            state.write_bytes(b"\xff")
+            before = state.read_bytes()
+            r = run_import("--source", "chatgpt", "--path", str(FIXTURE / "chatgpt"),
+                           "--root", str(out), "--yes")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("状态文件损坏或 UTF-8 解码失败", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertEqual(state.read_bytes(), before)
+            self.assertFalse(list(out.glob("*.md")))
+
+    def test_fatal_cli_errors_are_static_and_do_not_echo_secret_paths_or_details(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="private-directory-secret-") as td:
+            root = Path(td)
+            gemini = root / "private-gemini-secret.html"
+            deepseek = root / "private-deepseek-secret.json"
+            local = root / "private-local-secret.txt"
+            out = root / "private-output-secret"
+            gemini.write_bytes(b"\xff")
+            deepseek.write_text("{not json", encoding="utf-8")
+            local.write_text("not a session", encoding="utf-8")
+            cases = [
+                ("chatgpt", root / "private-missing-secret", out),
+                ("gemini", gemini, out),
+                ("deepseek", deepseek, out),
+                ("local", local, out),
+            ]
+            for source, path, target in cases:
+                with self.subTest(source=source):
+                    result = run_import("--source", source, "--path", str(path), "--root", str(target), "--yes")
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    combined = result.stdout + result.stderr
+                    self.assertNotIn("private-", combined)
+                    self.assertNotIn("Traceback", combined)
+            out.mkdir()
+            (out / ".imported.json").write_bytes(b"\xff")
+            result = run_import("--source", "chatgpt", "--path", str(FIXTURE / "chatgpt"),
+                                "--root", str(out), "--yes")
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("private-output-secret", result.stdout + result.stderr)
+
+    def test_aggregate_mapping_and_local_decode_reasons_hide_secret_values(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            secret_node = "secret-node-id"
+            export = root / "conversations-000.json"
+            export.write_text(json.dumps([{"id": "safe", "mapping": {
+                secret_node: {"parent": "secret-parent-id", "children": []},
+            }}]), encoding="utf-8")
+            convs, skipped, total = ic.parse_chatgpt(export)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(total, len(convs), 0, 0, 0, skipped, "chatgpt", False)
+            report = stream.getvalue()
+            self.assertIn("会话 mapping 结构损坏", report)
+            self.assertNotIn(secret_node, report)
+            self.assertNotIn("secret-parent-id", report)
+
+            bad_name = root / "secret-local-filename.jsonl"
+            bad_name.write_bytes(b"\xff")
+            found, failures = ic.discover_local_path(bad_name, None, (), "codex")
+            self.assertEqual(found, [])
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(0, 0, 0, 0, 0, failures, "local", True)
+            report = stream.getvalue()
+            self.assertIn("本地 JSONL UTF-8 解码失败", report)
+            self.assertNotIn("secret-local-filename", report)
+
+
+if __name__ == "__main__":
+    unittest.main()

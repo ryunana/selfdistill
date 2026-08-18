@@ -1,9 +1,9 @@
 # selfdistill × DeepSeek Harness 支持实施计划
 
-日期：2026-08-17  
-状态：待执行  
-设计依据：`docs/superpowers/specs/2026-08-17-dsh-support-design.md`  
-代码基线：`c618526`（设计文档提交，rebase 后）  
+日期：2026-08-17
+状态：待执行
+设计依据：`docs/superpowers/specs/2026-08-17-dsh-support-design.md`
+代码基线：`c618526`（设计文档提交，rebase 后）
 当前分支：`main`（本地）
 
 ## 1. 交付目标
@@ -55,7 +55,7 @@ dist/dsh/
   name: selfdistill-<fid>
   description: "<desc>"
   ---
-  
+
   <!-- distill:begin -->
   <正文>
   <!-- distill:end -->

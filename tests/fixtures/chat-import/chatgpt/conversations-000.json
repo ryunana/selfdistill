@@ -1,0 +1,95 @@
+[
+  {
+    "id": "chatgpt-conv-001",
+    "title": "虚构聊天：咖啡豆选择",
+    "create_time": 1750000000,
+    "mapping": {
+      "root": {
+        "id": "root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "m1"
+        ]
+      },
+      "m1": {
+        "id": "m1",
+        "message": {
+          "id": "m1",
+          "author": {
+            "role": "user"
+          },
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[SIMULATED] 我想学手冲咖啡，怎么入门？"
+            ]
+          },
+          "create_time": 1750000001
+        },
+        "parent": "root",
+        "children": [
+          "m2"
+        ]
+      },
+      "m2": {
+        "id": "m2",
+        "message": {
+          "id": "m2",
+          "author": {
+            "role": "assistant"
+          },
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[SIMULATED] 从设备、豆子、手法三方面开始。"
+            ]
+          },
+          "create_time": 1750000005
+        },
+        "parent": "m1",
+        "children": [
+          "m3",
+          "m3b"
+        ]
+      },
+      "m3": {
+        "id": "m3",
+        "message": {
+          "id": "m3",
+          "author": {
+            "role": "user"
+          },
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[SIMULATED] 那滤杯选哪种？"
+            ]
+          },
+          "create_time": 1750000010
+        },
+        "parent": "m2",
+        "children": []
+      },
+      "m3b": {
+        "id": "m3b",
+        "message": {
+          "id": "m3b",
+          "author": {
+            "role": "user"
+          },
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[SIMULATED] 那滤杯选哪种牌子？（重写分支，应被忽略）"
+            ]
+          },
+          "create_time": 1750000011
+        },
+        "parent": "m2",
+        "children": []
+      }
+    },
+    "current_node": "m3"
+  }
+]

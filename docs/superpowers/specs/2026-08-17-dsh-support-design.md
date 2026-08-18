@@ -1,7 +1,7 @@
 # selfdistill × DeepSeek Harness 支持设计
 
-日期：2026-08-17  
-状态：架构方向已批准，待用户复核书面设计  
+日期：2026-08-17
+状态：架构方向已批准，待用户复核书面设计
 基线：GitHub `main` 提交 `f6b65ea`（含 selfstill→selfdistill 重命名）
 
 ## 1. 结论

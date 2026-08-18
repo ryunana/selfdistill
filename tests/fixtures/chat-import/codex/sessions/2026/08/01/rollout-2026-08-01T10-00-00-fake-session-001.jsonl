@@ -1,0 +1,4 @@
+{"timestamp": "2026-08-01T10:00:00Z", "type": "session_meta", "payload": {"id": "fake-session-001", "cwd": "/tmp/fake"}}
+{"timestamp": "2026-08-01T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u1", "content": [{"type": "input_text", "text": "<environment_context><cwd>/tmp/fake</cwd></environment_context>[SIMULATED] 帮我写个 Python 脚本"}]}}
+{"timestamp": "2026-08-01T10:00:05Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "id": "a1", "content": [{"type": "output_text", "text": "[SIMULATED] 好的，脚本如下。"}]}}
+{"timestamp": "2026-08-01T10:00:06Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "u2", "content": [{"type": "input_text", "text": "[SIMULATED] 谢谢"}]}}

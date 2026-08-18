@@ -58,12 +58,12 @@ You don't need to learn Python first. Think of it as: **you export and confirm; 
 
 ### What you do
 
-1. Export your chat history from the relevant AI tool per [Import Sources](#import-sources), and put the exported files into the `input/` directory of this repo (git-ignored, never committed).
+1. Export your chat history from the relevant AI tool per [Import Sources](#import-sources). Keep raw exports in a local directory outside this repo, not in `input/`; run `python3 import_chats.py --source <source> --path <raw-export-path>` and let the importer write unified Markdown to `input/`.
 2. Hand this repo to the AI you're using (e.g. Codex, Claude Code, Hermes, or DeepSeek Harness) and tell it:
 
    ```text
    Take over this selfdistill project:
-   1. Follow docs/intake.md to organize the chat history I provide; keep raw records only in input/, don't commit them to Git;
+   1. Follow docs/intake.md to organize the chat history I provide; keep raw exports in a local directory outside this repo and never commit them; put only unified Markdown in input/;
    2. Follow prompts/distill.md and read all material from the start; first report your reading boundaries, then propose L1–L4 candidates;
    3. Confirm each L3 item and any personal/sensitive/high-risk/conflicting content with me individually; only visible, reversible, low-risk general rules may skip per-item confirmation;
    4. Do not write directly to canonical/, L4, or a resume. After I review the candidates, show the full aggregate diff and wait for my explicit confirmation before writing;
@@ -76,7 +76,7 @@ You don't need to learn Python first. Think of it as: **you export and confirm; 
 
 ### What the AI does
 
-1. Read `docs/intake.md`, normalize the exported records into unified Markdown, and place them in the git-ignored `input/`.
+1. Read `docs/intake.md`; keep raw exports in a local directory outside this repo, use `import_chats.py --path <raw-export-path>` to normalize them, and write only unified Markdown into the git-ignored `input/`.
 2. Distill L1–L4 candidates per `prompts/distill.md`; show sources and candidates first, don't touch the canonical profile yet.
 3. Only after the user has processed the candidates and explicitly confirmed the final aggregate diff, write incrementally into `canonical/` (structure per `templates/`; "张三" in this repo is a fictional sample).
 4. Run `python3 build.py` to produce `dist/index.html`, L1–L4 reports, and `dist/codex/`, `dist/hermes/`, `dist/dsh/`.
@@ -92,12 +92,27 @@ L3 is always confirmed item by item; personal content in L1/L2/L4, as well as se
 
 ## Import Sources
 
-| Source | Export entry (quick reference) | Details |
-|--------|-------------------------------|---------|
-| ChatGPT web | Avatar (bottom-left) → Settings → **Data management** → Export data; unzip to get `conversations-*.json` → put into `input/` | [docs/intake.md](docs/intake.md) |
-| Gemini web | Google Takeout → My Activity → **Gemini Apps** → Export; unzip to get `我的活动记录.html` → organize into `input/` | [docs/intake.md](docs/intake.md) |
-| DeepSeek web | Avatar (bottom-left) → **System settings** → **Data management** → **Export all chat history** → organize into `input/` | [docs/intake.md](docs/intake.md) |
-| Local Codex / Claude Code | Records live in local directories; ask the AI you're using to help normalize them → put into `input/` | [docs/intake.md](docs/intake.md) |
+**Auto importer** (recommended): feed export files to `import_chats.py`; local sessions are discovered automatically (dry-run list first, then confirmed writes):
+
+```bash
+python3 import_chats.py --source chatgpt  --path <export dir>
+python3 import_chats.py --source gemini   --path <Takeout dir>
+python3 import_chats.py --source deepseek --path <conversations.json or zip>
+python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--dry-run]
+# when local --path contains mixed JSONL files:
+python3 import_chats.py --source local --path <directory> --local-format auto|codex|claude --dry-run
+```
+
+The importer writes each Gemini `Prompted` activity separately. ChatGPT follows the active path when `current_node` is valid; it preserves and splits validated root-to-leaf branches only when the field is absent or `null`. A present malformed reference or reference to a missing node fails closed and is reported. DeepSeek branches are separate conversations rather than one invented merge. Images and authorized attachments become readable placeholders; model thinking, tool traces, and known local internal injections stay out of Markdown. `--dry-run` fully parses and reports planned new, updated, duplicate, and failed items without creating files. Exit code `0` means success (including expected internal exclusions), `2` partial success, and `1` fatal or all-failed input.
+
+| Source | Export entry (quick reference) | Auto import |
+|--------|-------------------------------|-------------|
+| ChatGPT web | Avatar (bottom-left) → Settings → **Data management** → Export data; unzip to get `conversations-*.json` | `--source chatgpt` |
+| Gemini web ⚗️ | Google Takeout → My Activity → **Gemini Apps** → Export; unzip to get `我的活动记录.html` | `--source gemini` (one conversation per Prompted activity; stops for unreliable activity containers) |
+| DeepSeek web | Avatar (bottom-left) → **System settings** → **Data management** → **Export all chat history** | `--source deepseek` |
+| Local Codex / Claude Code | Sessions live in `~/.codex/sessions`, `~/.claude/projects` | `--source local` (auto-discovery) |
+
+Full format details and the manual fallback live in [docs/intake.md](docs/intake.md).
 
 ## Outputs & Write-back Targets
 
