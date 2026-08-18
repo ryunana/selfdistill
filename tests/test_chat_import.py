@@ -1065,6 +1065,22 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(msgs[0][1], "2026-08-02 15:00")
         self.assertIn("东京待三天", msgs[0][3])
 
+    def test_gemini_document_close_rejects_truncated_container_without_prefix_import(self) -> None:
+        completed = (
+            '<div class="outer-cell"><div class="content-cell mdl-typography--body-1">'
+            'Prompted: complete question</div><div class="content-cell mdl-typography--body-1">'
+            '2026年8月3日 16:05:00 CST</div><p>complete answer</p></div>')
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            p.write_text(completed, encoding="utf-8")
+            convs, skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs), skipped), (1, 1, []))
+
+            p.write_text(completed + '<div class="outer-cell"><div class="content-cell '
+                         'mdl-typography--body-1">Prompted: truncated', encoding="utf-8")
+            with self.assertRaisesRegex(ic.ImportError_, "Gemini 活动容器未闭合"):
+                ic.parse_gemini(p)
+
     def test_gemini_activity_container_keeps_data_nodes_separate(self) -> None:
         convs, _skipped, total = ic.parse_gemini(FIXTURE / "gemini" / "activity-container.html")
         self.assertEqual((total, len(convs)), (1, 1))
@@ -1393,6 +1409,39 @@ class CliTests(unittest.TestCase):
         self.assertEqual(guard.call_count, 2)
         self.assertLessEqual(managed.call_count, 2 * (len(conversations) + 1) + 2)
 
+    def test_batch_path_owner_index_avoids_quadratic_state_collision_scans(self) -> None:
+        out = self._tmp()
+        prior_count = 400
+        imported = {
+            f"chatgpt:prior-{i}": {
+                "path": str(out.parent / f"prior-{i}.md"), "imported_at": "2026-08-01",
+                "title": "prior", "message_ids": [],
+            }
+            for i in range(prior_count)
+        }
+        conversations = [
+            ("chatgpt", f"indexed-{i}", "title", "2026-08-01",
+             [("user", None, f"m-{i}", "visible")])
+            for i in range(prior_count)
+        ]
+        with (unittest.mock.patch.object(ic, "_same_path", wraps=ic._same_path) as same_path,
+              unittest.mock.patch.object(ic, "_build_path_owner_index",
+                                         wraps=ic._build_path_owner_index) as build_index):
+            total, outputs, new, updated, dup, skipped = ic.import_convs(
+                conversations, [], len(conversations), imported, out, dry_run=False)
+        self.assertEqual((total, outputs, new, updated, dup, skipped),
+                         (prior_count, prior_count, prior_count, 0, 0, []))
+        self.assertEqual(build_index.call_count, 1)
+        self.assertEqual(same_path.call_count, 0)
+
+        duplicate_path = str(out.parent / "duplicate.md")
+        duplicate_state = {
+            "chatgpt:one": {"path": duplicate_path, "imported_at": "2026-08-01", "title": "x", "message_ids": []},
+            "chatgpt:two": {"path": duplicate_path, "imported_at": "2026-08-01", "title": "x", "message_ids": []},
+        }
+        with self.assertRaisesRegex(ic.ImportError_, "状态存在重复目标声明"):
+            ic.import_convs([], [], 0, duplicate_state, out.parent / "duplicate-out", dry_run=True)
+
     def test_same_batch_conversation_key_is_rejected_without_overwriting_first(self) -> None:
         out = self._tmp()
         first = ("chatgpt", "same", "first", "2026-08-01", [("user", None, "u1", "first")])
@@ -1571,15 +1620,28 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ic.discover_local(roots=roots, failures=failures), [])
             self.assertEqual(failures, [("—", ic.SKIP_EMPTY)])
 
-            def default_local_result(out: Path) -> tuple[int, str]:
+            def default_local_result(out: Path, selected_roots: tuple) -> tuple[int, str]:
                 stream = io.StringIO()
                 argv = ["import_chats.py", "--source", "local", "--root", str(out), "--dry-run"]
-                with (unittest.mock.patch.object(ic, "LOCAL_ROOTS", roots),
+                with (unittest.mock.patch.object(ic, "LOCAL_ROOTS", selected_roots),
                       unittest.mock.patch.object(sys, "argv", argv),
                       redirect_stdout(stream)):
                     return ic.main(), stream.getvalue()
 
-            code, output = default_local_result(Path(td) / "zero-out")
+            direct = ic.run_local([], unittest.mock.Mock(yes=True, dry_run=True), {}, Path(td) / "direct-out", [])
+            self.assertEqual(direct[-1], [("—", ic.SKIP_EMPTY)])
+            code, output = default_local_result(Path(td) / "zero-out", roots)
+            self.assertEqual(code, 1)
+            self.assertIn("无消息", output)
+
+            no_files = root / "no-files"
+            no_files.mkdir()
+            empty_roots = (("codex", str(no_files), "*.jsonl"),)
+            code, output = default_local_result(Path(td) / "empty-out", empty_roots)
+            self.assertEqual(code, 1)
+            self.assertIn("无消息", output)
+
+            code, output = default_local_result(Path(td) / "no-roots-out", ())
             self.assertEqual(code, 1)
             self.assertIn("无消息", output)
 
@@ -1587,7 +1649,7 @@ class CliTests(unittest.TestCase):
                 "type": "response_item", "payload": {"type": "message", "role": "user",
                                                              "content": [{"type": "input_text", "text": "visible"}]},
             }), encoding="utf-8")
-            code, output = default_local_result(Path(td) / "mixed-out")
+            code, output = default_local_result(Path(td) / "mixed-out", roots)
             self.assertEqual(code, 2)
             self.assertIn("预计新导入 1", output)
             self.assertIn("无消息", output)

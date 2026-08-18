@@ -541,10 +541,13 @@ def parse_gemini(path: Path) -> tuple:
     try:
         parser = _GeminiActivityExtractor()
         parser.feed(target.read_text(encoding="utf-8"))
+        parser.close()
     except UnicodeDecodeError:
         raise ImportError_(f"Gemini HTML UTF-8 解码失败：{target.name}")
     except OSError as e:
         raise ImportError_(f"无法读取 {target}：{e}")
+    if parser._depth != 0 or parser._tags:
+        raise ImportError_("Gemini 活动容器未闭合，无法可靠解析（请改用手工整理）")
     if not parser.blocks:
         raise ImportError_(f"{target} 未找到可靠的 Gemini 活动容器（请改用手工整理）")
     activities = []
@@ -1451,13 +1454,48 @@ def _same_path(left, right) -> bool:
     return os.path.abspath(os.fspath(left)) == os.path.abspath(os.fspath(right))
 
 
-def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
-                                  imported: dict) -> None:
-    """Fail closed when lossy filename sanitization would target another conversation."""
+def _normalized_path(path) -> str:
+    return os.path.abspath(os.fspath(path))
+
+
+def _build_path_owner_index(imported: dict) -> dict[str, str]:
+    """Index state claims once so batch collision checks stay O(1) per write."""
+    owners: dict[str, str] = {}
     for other_key, entry in imported.items():
-        if other_key != key and isinstance(entry, dict) and isinstance(entry.get("path"), str):
-            if _same_path(entry["path"], path):
-                raise ImportError_("文件名冲突：目标文件已被其他会话占用")
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            continue
+        normalized = _normalized_path(entry["path"])
+        owner = owners.get(normalized)
+        if owner is not None and owner != other_key:
+            raise ImportError_("文件名冲突：状态存在重复目标声明")
+        owners[normalized] = other_key
+    return owners
+
+
+def _claim_path_owner(path_owners: dict[str, str], key: str, path: Path) -> None:
+    normalized = _normalized_path(path)
+    owner = path_owners.get(normalized)
+    if owner is not None and owner != key:
+        raise ImportError_("文件名冲突：目标文件已被其他会话占用")
+    path_owners[normalized] = key
+
+
+def _conversation_output_path(conv: tuple, out_dir: Path) -> Path:
+    return out_dir / f"{conv[0]}-{_sanitize_filename(conv[1])}.md"
+
+
+def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
+                                  imported: dict, path_owners: Optional[dict[str, str]] = None) -> None:
+    """Fail closed when lossy filename sanitization would target another conversation."""
+    if path_owners is not None:
+        owner = path_owners.get(_normalized_path(path))
+        if owner is not None and owner != key:
+            raise ImportError_("文件名冲突：目标文件已被其他会话占用")
+    else:
+        for other_key, entry in imported.items():
+            if other_key != key and isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                if _same_path(entry["path"], path):
+                    raise ImportError_("文件名冲突：目标文件已被其他会话占用")
     if not path.exists():
         return
     content = path.read_text(encoding="utf-8")
@@ -1471,12 +1509,13 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
 def _claim_dry_run_output(conv: tuple, imported: dict, out_dir: Path) -> None:
     """Record an in-memory output claim so dry-run reports later collisions."""
     source, cid, title, _exported_at, msgs = conv
-    path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
+    path = _conversation_output_path(conv, out_dir)
     imported[f"{source}:{cid}"] = _state_entry(path, title, msgs)
 
 
 def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool = False,
-                       *, _batch_prevalidated: bool = False) -> str:
+                       *, _batch_prevalidated: bool = False,
+                       _path_owners: Optional[dict[str, str]] = None) -> str:
     """Markdown is the source of truth; state is reconstructed from its final block."""
     source, cid, title, exported_at, msgs = conv
     if _batch_prevalidated:
@@ -1487,10 +1526,10 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
     ids = [m[2] for m in msgs]
     if len(ids) != len(set(ids)):
         raise ImportError_("会话出现重复 message_id，拒绝写入")
-    path = out_dir / f"{source}-{_sanitize_filename(cid)}.md"
+    path = _conversation_output_path(conv, out_dir)
     if path.is_symlink():
         raise ImportError_("输出目标是符号链接，拒绝写入")
-    _assert_no_filename_collision(source, cid, key, path, imported)
+    _assert_no_filename_collision(source, cid, key, path, imported, _path_owners)
     desired = _render_messages(msgs)
     result = "new"
     if path.exists():
@@ -1666,6 +1705,7 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
     # Validate the complete root once for this batch.  Individual writes keep
     # path/target checks, while save_imported performs a final full recheck.
     _assert_safe_output_root(out_dir)
+    path_owners = _build_path_owner_index(imported)
     if total == 0 and not convs and not skipped:
         skipped.append(("导出文件", SKIP_EMPTY))
     for conv in convs:
@@ -1676,11 +1716,12 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
         seen_keys.add(key)
         try:
             result = write_conversation(conv, imported, out_dir, dry_run,
-                                        _batch_prevalidated=True)
+                                        _batch_prevalidated=True, _path_owners=path_owners)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
             detail = str(e) if isinstance(e, ImportError_) else "输出写入失败"
             skipped.append(("—", f"写入失败：{detail}"))
             continue
+        _claim_path_owner(path_owners, key, _conversation_output_path(conv, out_dir))
         if dry_run:
             _claim_dry_run_output(conv, imported, out_dir)
         if result == "dup":
@@ -1697,6 +1738,8 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
 def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failures: Optional[list] = None) -> tuple:
     discovery_failures = discovery_failures or []
     if not found:
+        if not any(not _is_expected_exclusion(reason) for _ref, reason in discovery_failures):
+            discovery_failures.append(("—", SKIP_EMPTY))
         print("未发现可导入的本地会话（codex/claude）。")
         return (0, 0, 0, 0, 0, discovery_failures)
     total_size = sum(f[5] for f in found)
@@ -1708,6 +1751,7 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
     # This is deliberately before confirmation and is read-only: dry-runs and
     # cancelled batches validate the same root without adopting or chmodding it.
     _assert_safe_output_root(out_dir)
+    path_owners = _build_path_owner_index(imported)
     if not args.dry_run and not args.yes:
         try:
             ans = input(f"\n确认导入以上 {len(found)} 个会话？[y/N] ").strip().lower()
@@ -1738,11 +1782,12 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
         seen_keys.add(key)
         try:
             result = write_conversation(convs[0], imported, out_dir, args.dry_run,
-                                        _batch_prevalidated=True)
+                                        _batch_prevalidated=True, _path_owners=path_owners)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
             detail = str(e) if isinstance(e, ImportError_) else "输出写入失败"
             bad.append(("—", f"写入失败：{detail}"))
             continue
+        _claim_path_owner(path_owners, key, _conversation_output_path(convs[0], out_dir))
         if args.dry_run:
             _claim_dry_run_output(convs[0], imported, out_dir)
         if result == "dup":
