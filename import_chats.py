@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
 import zipfile
@@ -118,7 +119,8 @@ def _safe_scalar(value) -> Optional[str]:
     """Accept only normal scalar metadata; nested values never become text."""
     if isinstance(value, str):
         return value if value else None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and (not isinstance(value, float) or math.isfinite(value))):
         return str(value)
     return None
 
@@ -159,6 +161,26 @@ def _sanitize_filename(name: str) -> str:
 
 def _path_fingerprint(path: list[str]) -> str:
     return hashlib.sha1("\x1f".join(path).encode("utf-8")).hexdigest()[:12]
+
+
+def _stable_branch_cids(base: str, outputs: list[tuple[list[str], list]],
+                        children: dict[str, list[str]], nodes: dict[str, dict]) -> list[str]:
+    """Keep the historical/main branch at base; name alternatives by stable forks.
+
+    Sorted normalized node references make primary-child selection independent
+    of both mapping-key and explicit-children serialization order.
+    """
+    if len(outputs) <= 1:
+        return [base] * len(outputs)
+    cids = []
+    for path, _msgs in outputs:
+        alternatives = []
+        for index, nid in enumerate(path[1:], 1):
+            siblings = children.get(path[index - 1], ())
+            if len(siblings) > 1 and nid != min(siblings):
+                alternatives.append(nid)
+        cids.append(base if not alternatives else f"{base}--branch-{_path_fingerprint(alternatives)}")
+    return cids
 
 
 def _graph_reference(value, *, allow_null: bool = False) -> Optional[str]:
@@ -359,16 +381,20 @@ def parse_chatgpt(path: Path) -> tuple:
             except ImportError_:
                 skipped.append(("—", "会话 mapping 结构损坏"))
                 continue
-            current_present = "current_node" in conv and conv.get("current_node") is not None
-            if current_present:
+            current_present = "current_node" in conv
+            raw_current = conv.get("current_node")
+            if current_present and raw_current is not None:
                 try:
-                    current = _graph_reference(conv.get("current_node"))
+                    current = _graph_reference(raw_current)
                 except ImportError_:
                     skipped.append(("—", "ChatGPT current_node 引用无效"))
                     continue
             else:
                 current = None
-            has_valid_current = current is not None and current in nodes
+            if current_present and current is not None and current not in nodes:
+                skipped.append(("—", "ChatGPT current_node 不存在"))
+                continue
+            has_valid_current = current is not None
             paths = ([_path_from_parents(parents, current)] if has_valid_current
                      else _materialize_root_to_leaf_paths(parents, children))
             valid = []
@@ -421,11 +447,11 @@ def parse_chatgpt(path: Path) -> tuple:
                     skipped.append(("—", "内部内容已排除：ChatGPT 已知消息角色"))
                 continue
             branching = not has_valid_current and len(valid) > 1
-            for index, (node_path, msgs) in enumerate(valid, 1):
-                cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
+            cids = (_stable_branch_cids(base, valid, children, nodes) if branching else [base] * len(valid))
+            for (node_path, msgs), cid in zip(valid, cids):
                 title = _safe_title(conv.get("title"))
-                if branching:
-                    title += f"（分支 {index}）"
+                if branching and cid != base:
+                    title += "（分支）"
                 convs.append(_make_conversation("chatgpt", cid, title, msgs))
             if unknown_parts_by_node:
                 skipped.append(("—", f"未识别 ChatGPT 附件 {sum(unknown_parts_by_node.values())} 个"))
@@ -562,6 +588,21 @@ def _gemini_user_text(lines: list[str], provider_indexes: Optional[set[int]] = N
     return "\n".join(out).strip()
 
 
+def _is_known_gemini_information_container(lines: list[str], structural_time_indexes: set[int],
+                                            provider_indexes: set[int], chrome_indexes: set[int]) -> bool:
+    """Recognize only the fixed, chrome-only Takeout information rows."""
+    if not chrome_indexes:
+        return False
+    # Direct provider/time-field placement is not itself proof that arbitrary
+    # text is chrome. Every non-chrome field must independently be safe
+    # metadata; otherwise retain a static failure for review.
+    non_chrome = [line for i, line in enumerate(lines) if i not in chrome_indexes]
+    if not non_chrome or not all(_TIME_FIELD.fullmatch(line) or _GEMINI_URL_LINE.fullmatch(line)
+                                 for line in non_chrome):
+        return False
+    return sum(1 for i in chrome_indexes if _GEMINI_DROP_LINES.fullmatch(lines[i])) >= 5
+
+
 def parse_gemini(path: Path) -> tuple:
     """Split Takeout activity containers; never invent a global conversation stream."""
     if path.is_file():
@@ -586,6 +627,7 @@ def parse_gemini(path: Path) -> tuple:
     if not parser.blocks:
         raise ImportError_(f"{target} 未找到可靠的 Gemini 活动容器（请改用手工整理）")
     activities = []
+    skipped = []
     pending = None
     for lines, structural_time_indexes, provider_indexes, chrome_indexes in parser.blocks:
         prompt_indexes = [i for i, line in enumerate(lines)
@@ -639,7 +681,11 @@ def parse_gemini(path: Path) -> tuple:
                 pending["answer"] = answer
                 activities.append(pending)
                 pending = None
-        # Non-Prompted Takeout activity rows are informational and intentionally ignored.
+        elif _is_known_gemini_information_container(lines, structural_time_indexes,
+                                                     provider_indexes, chrome_indexes):
+            skipped.append(("—", "内部内容已排除：Gemini 已知信息活动"))
+        else:
+            skipped.append(("—", "Gemini 未绑定活动容器"))
     if pending is not None:
         activities.append(pending)
     if not activities:
@@ -658,7 +704,7 @@ def parse_gemini(path: Path) -> tuple:
         if activity["answer"]:
             msgs.append(("assistant", activity["time"], f"{cid}:assistant:2", activity["answer"]))
         convs.append(_make_conversation("gemini", cid, "Gemini 活动", msgs))
-    return convs, [], len(activities)
+    return convs, skipped, len(activities)
 
 
 # ---------- 解析器：DeepSeek ----------
@@ -762,8 +808,9 @@ def parse_deepseek(path: Path) -> tuple:
             skipped.append(("—", malformed_reason))
             continue
         try:
-            paths = _root_to_leaf_paths(mapping)
-        except ImportError_ as e:
+            nodes, _parents, children = _validate_conversation_graph(mapping)
+            paths = _materialize_root_to_leaf_paths(_parents, children)
+        except ImportError_:
             skipped.append(("—", "会话 mapping 结构损坏"))
             continue
         outputs = []
@@ -771,7 +818,7 @@ def parse_deepseek(path: Path) -> tuple:
         for node_path in paths:
             msgs = []
             for nid in node_path:
-                node = mapping[nid]
+                node = nodes[nid]
                 msg = node.get("message") or {}
                 t = fmt_time(msg.get("inserted_at"))
                 role = None
@@ -820,11 +867,11 @@ def parse_deepseek(path: Path) -> tuple:
             skipped.append(("—", SKIP_EMPTY))
             continue
         branching = len(outputs) > 1
-        for index, (node_path, msgs) in enumerate(outputs, 1):
-            cid = f"{base}--branch-{_path_fingerprint(node_path)}" if branching else base
+        cids = _stable_branch_cids(base, outputs, children, nodes) if branching else [base] * len(outputs)
+        for (node_path, msgs), cid in zip(outputs, cids):
             title = _safe_title(conv.get("title"))
-            if branching:
-                title += f"（分支 {index}）"
+            if branching and cid != base:
+                title += "（分支）"
             convs.append(_make_conversation("deepseek", cid, title, msgs))
     if tool_count:
         skipped.append(("—", f"工具片段 {tool_count} 条（SEARCH/TOOL_SEARCH/TOOL_OPEN）已识别，不纳入蒸馏正文"))
@@ -1172,8 +1219,8 @@ def _claude_content_text(content, events: Optional[list[str]]) -> tuple[str, boo
 
 
 def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[list]:
-    cid = path.stem
     msgs: list = []
+    session_ids: set[str] = set()
     try:
         fh = path.open(encoding="utf-8")
     except OSError as e:
@@ -1194,6 +1241,13 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                     if events is not None:
                         events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行")
                     continue
+                if "sessionId" in d:
+                    session_id = _usable_conversation_id(d.get("sessionId"))
+                    if session_id is None:
+                        raise ImportError_("Claude sessionId 无效")
+                    session_ids.add(session_id)
+                    if len(session_ids) > 1:
+                        raise ImportError_("Claude sessionId 不一致")
                 if d.get("isMeta") is True:
                     if events is not None:
                         events.append("内部内容已排除：Claude isMeta")
@@ -1261,6 +1315,7 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
         raise ImportError_("Claude JSONL UTF-8 解码失败")
     if not msgs:
         return None
+    cid = next(iter(session_ids)) if session_ids else path.stem
     title = _first_user_snippet(msgs) or path.stem
     return [_make_conversation("claude", cid, title, msgs)]
 
@@ -1302,6 +1357,18 @@ def imported_path(out_dir: Path) -> Path:
     return out_dir / ".imported.json"
 
 
+def _assert_single_link_regular(path: Path, reason: str) -> None:
+    """Reject every existing symlink/hardlink before it can be trusted or changed."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise ImportError_(reason)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ImportError_(reason)
+
+
 def _validate_imported_state(data) -> dict:
     if not isinstance(data, dict):
         raise ImportError_("状态文件结构损坏，未修改（期望 JSON 对象）")
@@ -1327,6 +1394,7 @@ def _validate_imported_state(data) -> dict:
 
 def _is_valid_imported_state(path: Path) -> bool:
     try:
+        _assert_single_link_regular(path, "状态文件不是安全普通文件，拒绝访问")
         _validate_imported_state(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ImportError_):
         return False
@@ -1347,7 +1415,11 @@ def _header_ownership_metadata(content: str) -> Optional[tuple[str, str]]:
 
 
 def _is_managed_markdown(path: Path) -> bool:
-    if path.is_symlink() or not path.is_file() or path.suffix != ".md":
+    if path.suffix != ".md":
+        return False
+    try:
+        _assert_single_link_regular(path, "输出目标不是安全普通文件，拒绝访问")
+    except ImportError_:
         return False
     try:
         content = path.read_text(encoding="utf-8")
@@ -1375,22 +1447,34 @@ def _assert_output_root_ownership(out_dir: Path, allow_invalid_state: bool = Fal
         return
     exact_input = resolved == INPUT_DIR.resolve(strict=False)
     if exact_input and all(entry.name == ".gitkeep" and entry.is_file() and not entry.is_symlink()
-                           for entry in entries):
+                           and entry.lstat().st_nlink == 1 for entry in entries):
         return
     state = imported_path(out_dir)
     valid_state = state.exists() and _is_valid_imported_state(state)
     for entry in entries:
         if entry.name == ".gitkeep":
-            if entry.is_symlink() or not entry.is_file():
+            if entry.is_symlink():
+                raise ImportError_("输出根目录包含符号链接，拒绝访问")
+            try:
+                _assert_single_link_regular(entry, "输出根目录不是导入器目录，拒绝访问")
+            except ImportError_:
                 raise ImportError_("输出根目录不是导入器目录，拒绝访问")
             continue
         if entry.name == ".imported.json":
-            if entry.is_symlink() or not entry.is_file():
+            if entry.is_symlink():
+                raise ImportError_("输出根目录包含符号链接，拒绝访问")
+            try:
+                _assert_single_link_regular(entry, "输出根目录不是导入器目录，拒绝访问")
+            except ImportError_:
                 raise ImportError_("输出根目录不是导入器目录，拒绝访问")
             continue
         if entry.is_symlink():
             raise ImportError_("输出根目录包含符号链接，拒绝访问")
-        if not entry.is_file() or entry.suffix != ".md":
+        try:
+            _assert_single_link_regular(entry, "输出根目录不是导入器目录，拒绝访问")
+        except ImportError_:
+            raise ImportError_("输出根目录不是导入器目录，拒绝访问")
+        if entry.suffix != ".md":
             raise ImportError_("输出根目录不是导入器目录，拒绝访问")
         # State presence never grants ownership of arbitrary Markdown.  Each
         # Markdown file must carry the independently verifiable managed shape.
@@ -1425,6 +1509,8 @@ def _assert_output_root_path_safety(out_dir: Path) -> None:
             raise ImportError_("输出根目录祖先是符号链接，拒绝访问")
     if imported_path(out_dir).is_symlink():
         raise ImportError_("状态文件是符号链接，拒绝访问")
+    if imported_path(out_dir).exists():
+        _assert_single_link_regular(imported_path(out_dir), "状态文件不是安全普通文件，拒绝访问")
 
 
 def _assert_safe_output_root(out_dir: Path, allow_invalid_state: bool = False) -> None:
@@ -1548,6 +1634,7 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
                     raise ImportError_("文件名冲突：目标文件已被其他会话占用")
     if not path.exists():
         return
+    _assert_single_link_regular(path, "输出目标不是安全普通文件，拒绝写入")
     content = path.read_text(encoding="utf-8")
     ownership = _header_ownership_metadata(content)
     if ownership is None:
@@ -1577,8 +1664,8 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
     if len(ids) != len(set(ids)):
         raise ImportError_("会话出现重复 message_id，拒绝写入")
     path = _conversation_output_path(conv, out_dir)
-    if path.is_symlink():
-        raise ImportError_("输出目标是符号链接，拒绝写入")
+    if path.exists() or path.is_symlink():
+        _assert_single_link_regular(path, "输出目标不是安全普通文件，拒绝写入")
     _assert_no_filename_collision(source, cid, key, path, imported, _path_owners)
     desired = _render_messages(msgs)
     result = "new"
@@ -1796,8 +1883,10 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
         return (0, 0, 0, 0, 0, discovery_failures)
     total_size = sum(f[5] for f in found)
     print(f"发现 {len(found)} 个本地会话，总大小 {total_size / 1024:.0f} KB：")
-    for source, sid, title, first_t, last_t, size, path in found:
-        print(f"  [{source}] {title or sid}  {first_t or '?'} ~ {last_t or '?'}  {size}B  {path}")
+    for index, (source, _sid, _title, first_t, last_t, size, _path) in enumerate(found, 1):
+        # Discovery can touch private local exports.  The confirmation list
+        # exposes only operational metadata, never titles, IDs, or paths.
+        print(f"  {index}. [{source}] {first_t or '?'} ~ {last_t or '?'}  {size}B")
     if args.dry_run:
         print("（--dry-run：完整解析和对账，未写入任何文件）")
     # This is deliberately before confirmation and is read-only: dry-runs and

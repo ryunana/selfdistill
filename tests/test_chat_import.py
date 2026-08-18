@@ -263,7 +263,7 @@ class ParserTests(unittest.TestCase):
     def test_chatgpt_missing_current_node_splits_leaf_paths_and_redacts_parts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "conversations-000.json"
-            conv = {"id": "cg", "title": "分支", "current_node": "missing", "mapping": {
+            conv = {"id": "cg", "title": "分支", "mapping": {
                 "root": {"id": "root", "parent": None, "children": ["u"]},
                 "u": {"id": "u", "parent": "root", "children": ["a", "b"], "message": {
                     "id": "u", "author": {"role": "user"}, "create_time": 1,
@@ -275,7 +275,8 @@ class ParserTests(unittest.TestCase):
             convs, skipped, _total = ic.parse_chatgpt(p)
             self.assertEqual(len(convs), 2)
             self.assertEqual(len({c[1] for c in convs}), 2)
-            self.assertEqual({c[1] for c in convs}, {"cg--branch-" + c[1].split("--branch-")[1] for c in convs})
+            self.assertIn("cg", {c[1] for c in convs})
+            self.assertTrue(any(c[1].startswith("cg--branch-") for c in convs))
             user_text = convs[0][4][0][3]
             self.assertIn("[图片]", user_text)
             self.assertIn("[未识别附件]", user_text)
@@ -488,7 +489,8 @@ class ParserTests(unittest.TestCase):
             bodies = ["\n".join(m[3] for m in c[4]) for c in convs]
             self.assertTrue(any("回答 A" in b and "回答 B" not in b for b in bodies))
             self.assertTrue(any("回答 B" in b and "回答 A" not in b for b in bodies))
-            self.assertTrue(all("--branch-" in c[1] for c in convs))
+            self.assertIn("d", {c[1] for c in convs})
+            self.assertTrue(any("--branch-" in c[1] for c in convs))
 
     def test_codex_cleans_system_blocks(self) -> None:
         convs = ic.parse_codex(FIXTURE / "codex" / "sessions" / "2026" / "08" / "01"
@@ -808,7 +810,7 @@ class ParserTests(unittest.TestCase):
             p = Path(td) / "conversations-000.json"
             def message(role, text):
                 return {"author": {"role": role}, "content": {"parts": [text]}}
-            p.write_text(json.dumps([{"id": "shared", "current_node": "missing", "mapping": {
+            p.write_text(json.dumps([{"id": "shared", "mapping": {
                 "root": {"parent": None, "children": ["system"]},
                 "system": {"parent": "root", "children": ["tool"], "message": message("system", "internal")},
                 "tool": {"parent": "system", "children": ["unknown-a"], "message": message("tool", "internal")},
@@ -827,7 +829,7 @@ class ParserTests(unittest.TestCase):
     def test_chatgpt_shared_branch_reasoning_and_unknown_parts_are_counted_once(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "conversations-000.json"
-            p.write_text(json.dumps([{"id": "shared", "current_node": "missing", "mapping": {
+            p.write_text(json.dumps([{"id": "shared", "mapping": {
                 "root": {"parent": None, "children": ["reasoning"]},
                 "reasoning": {"parent": "root", "children": ["user"], "message": {
                     "author": {"role": "assistant"}, "content": {
@@ -1422,6 +1424,187 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(len(list(out.glob("*.md"))), 1)
             self.assertIn("later answer", rendered)
 
+    def test_chatgpt_present_stale_current_node_fails_closed_without_leaking(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            mapping = {
+                "root": {"parent": None, "children": ["m"]},
+                "m": {"parent": "root", "children": [], "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["visible"]}}},
+            }
+            p.write_text(json.dumps([{
+                "id": "safe", "title": "private-title", "current_node": "private-stale-node",
+                "mapping": mapping,
+            }]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual(convs, [])
+            self.assertEqual([reason for _ref, reason in skipped], ["ChatGPT current_node 不存在"])
+            report = io.StringIO()
+            with redirect_stdout(report):
+                ic.print_report(1, 0, 0, 0, 0, skipped, "chatgpt", False)
+            self.assertNotIn("private-title", report.getvalue())
+            self.assertNotIn("private-stale-node", report.getvalue())
+            for current in (unittest.mock.DEFAULT, None):
+                record = {"id": "safe", "mapping": mapping}
+                if current is not unittest.mock.DEFAULT:
+                    record["current_node"] = current
+                p.write_text(json.dumps([record]), encoding="utf-8")
+                with self.subTest(current=current):
+                    fallback_convs, fallback_skipped, _ = ic.parse_chatgpt(p)
+                    self.assertEqual((len(fallback_convs), fallback_skipped), (1, []))
+
+    def test_gemini_known_information_and_unknown_containers_are_accounted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            chrome = "".join(
+                f"<div class='header-cell'>{line}</div>" for line in (
+                    "Gemini Apps", "商品：", "详细信息：", "为什么此处会显示此活动记录？", "控制这些设置"))
+            p.write_text(f"""<html><body>
+<div class='outer-cell'><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：visible</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><p>answer</p></div>
+<div class='outer-cell'>{chrome}<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:06</div></div>
+<div class='outer-cell'><div class='header-cell'>private unknown provider row</div></div>
+</body></html>""", encoding="utf-8")
+            convs, skipped, total = ic.parse_gemini(p)
+            self.assertEqual((total, len(convs)), (1, 1))
+            reasons = [reason for _ref, reason in skipped]
+            self.assertIn("内部内容已排除：Gemini 已知信息活动", reasons)
+            self.assertIn("Gemini 未绑定活动容器", reasons)
+            report = io.StringIO()
+            with redirect_stdout(report):
+                ic.print_report(total, 1, 1, 0, 0, skipped, "gemini", False)
+            self.assertNotIn("private unknown", report.getvalue())
+            result = run_import("--source", "gemini", "--path", str(p), "--root", str(Path(td) / "out"), "--yes")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("Gemini 未绑定活动容器", result.stdout)
+            self.assertNotIn("private unknown", result.stdout)
+
+    def test_gemini_information_container_never_trusts_arbitrary_time_field_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            chrome = "".join(
+                f"<div class='header-cell'>{line}</div>" for line in (
+                    "Gemini Apps", "商品：", "详细信息：", "为什么此处会显示此活动记录？", "控制这些设置"))
+            p.write_text(f"""<div class='outer-cell'>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：visible</div>
+<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><p>answer</p></div>
+<div class='outer-cell'>{chrome}<div class='content-cell mdl-cell--6-col mdl-typography--body-1'>private body in provider field</div></div>""", encoding="utf-8")
+            convs, skipped, _total = ic.parse_gemini(p)
+            self.assertEqual(len(convs), 1)
+            self.assertEqual([reason for _ref, reason in skipped], ["Gemini 未绑定活动容器"])
+            report = io.StringIO()
+            with redirect_stdout(report):
+                ic.print_report(1, 1, 1, 0, 0, skipped, "gemini", False)
+            self.assertNotIn("private body", report.getvalue())
+
+    def test_claude_session_id_is_stable_across_renames_and_conflicts_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            records = [
+                {"sessionId": "stable-session", "type": "user", "timestamp": "2026-08-01T10:00:00Z",
+                 "message": {"role": "user", "content": "visible"}},
+                {"sessionId": "stable-session", "type": "assistant", "timestamp": "2026-08-01T10:01:00Z",
+                 "message": {"role": "assistant", "content": "answer"}},
+            ]
+            first_path, renamed_path = root / "first.jsonl", root / "renamed.jsonl"
+            payload = "\n".join(json.dumps(record) for record in records)
+            first_path.write_text(payload, encoding="utf-8")
+            renamed_path.write_text(payload, encoding="utf-8")
+            first, renamed = ic.parse_claude(first_path)[0], ic.parse_claude(renamed_path)[0]
+            self.assertEqual(first[1], "stable-session")
+            self.assertEqual(first[1], renamed[1])
+            out, imported = root / "out", {}
+            self.assertEqual(ic.write_conversation(first, imported, out), "new")
+            self.assertEqual(ic.write_conversation(renamed, imported, out), "dup")
+
+            for bad_session in ("other-session", {"private": "nested"}):
+                bad = list(records)
+                bad[1] = dict(bad[1], sessionId=bad_session)
+                first_path.write_text("\n".join(json.dumps(record) for record in bad), encoding="utf-8")
+                with self.subTest(session=type(bad_session).__name__):
+                    with self.assertRaisesRegex(ic.ImportError_, "Claude sessionId"):
+                        ic.parse_claude(first_path)
+
+    def test_nonfinite_provider_and_claude_session_ids_fail_without_leaking(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            chatgpt, deepseek, claude = (root / "conversations-000.json", root / "conversations.json",
+                                         root / "claude.jsonl")
+            chat_mapping = {"root": {"parent": None, "children": [], "message": {
+                "author": {"role": "user"}, "content": {"parts": ["visible"]}}}}
+            deep_mapping = {"root": {"parent": None, "children": [], "message": {
+                "fragments": [{"type": "REQUEST", "content": "visible"}]}}}
+            for nonfinite in (float("nan"), float("inf"), -float("inf")):
+                with self.subTest(value=repr(nonfinite)):
+                    self.assertIsNone(ic._safe_scalar(nonfinite))
+                    chatgpt.write_text(json.dumps([{
+                        "id": nonfinite, "title": "private-chat-title", "mapping": chat_mapping,
+                    }]), encoding="utf-8")
+                    deepseek.write_text(json.dumps([{
+                        "id": nonfinite, "title": "private-deep-title", "mapping": deep_mapping,
+                    }]), encoding="utf-8")
+                    for parser, path, reason in ((ic.parse_chatgpt, chatgpt, "ChatGPT 会话 ID 无效"),
+                                                 (ic.parse_deepseek, deepseek, "DeepSeek 会话 ID 无效")):
+                        convs, skipped, _ = parser(path)
+                        self.assertEqual(convs, [])
+                        self.assertEqual([event for _ref, event in skipped], [reason])
+                        report = io.StringIO()
+                        with redirect_stdout(report):
+                            ic.print_report(1, 0, 0, 0, 0, skipped, "source", False)
+                        self.assertNotIn("private-", report.getvalue())
+                    claude.write_text(json.dumps({
+                        "sessionId": nonfinite, "type": "user", "message": {"role": "user", "content": "visible"},
+                    }), encoding="utf-8")
+                    with self.assertRaisesRegex(ic.ImportError_, "Claude sessionId 无效"):
+                        ic.parse_claude(claude)
+
+    def test_chatgpt_and_deepseek_branch_ids_survive_append_fork_and_reorder(self) -> None:
+        def node(source, role, text, parent, children):
+            if source == "chatgpt":
+                return {"parent": parent, "children": children, "message": {
+                    "id": f"{role}-{text}", "author": {"role": role}, "content": {"parts": [text]}}}
+            fragment_type = "REQUEST" if role == "user" else "RESPONSE"
+            return {"parent": parent, "children": children, "message": {
+                "fragments": [{"type": fragment_type, "content": text}]}}
+
+        for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
+                                         ("deepseek", "conversations.json", ic.parse_deepseek)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                p, out, imported = Path(td) / filename, Path(td) / "out", {}
+                mapping = {
+                    "root": {"parent": None, "children": ["u"]},
+                    "u": node(source, "user", "question", "root", ["a"]),
+                    "a": node(source, "assistant", "first", "u", []),
+                }
+
+                def parse_current():
+                    record = {"id": "stable", "mapping": mapping}
+                    p.write_text(json.dumps([record]), encoding="utf-8")
+                    return parser(p)[0]
+
+                first = parse_current()
+                self.assertEqual([conv[1] for conv in first], ["stable"])
+                self.assertEqual(ic.import_convs(first, [], 1, imported, out, False)[2], 1)
+                mapping["a"]["children"] = ["a2"]
+                mapping["a2"] = node(source, "assistant", "continued", "a", [])
+                appended = parse_current()
+                self.assertEqual([conv[1] for conv in appended], ["stable"])
+                self.assertEqual(ic.import_convs(appended, [], 1, imported, out, False)[3], 1)
+                mapping["u"]["children"] = ["a", "b"]
+                mapping["b"] = node(source, "assistant", "alternate", "u", [])
+                forked = parse_current()
+                forked_ids = {conv[1] for conv in forked}
+                self.assertIn("stable", forked_ids)
+                self.assertEqual(len(forked_ids), 2)
+                self.assertEqual(ic.import_convs(forked, [], 2, imported, out, False)[1], 2)
+                self.assertEqual(len(list(out.glob(f"{source}-*.md"))), 2)
+                mapping["u"]["children"] = ["b", "a"]
+                mapping = dict(reversed(list(mapping.items())))
+                reordered = parse_current()
+                self.assertEqual({conv[1] for conv in reordered}, forked_ids)
+                result = ic.import_convs(reordered, [], 2, imported, out, False)
+                self.assertEqual((result[2], result[3], result[4]), (0, 0, 2))
+                self.assertEqual(len(list(out.glob(f"{source}-*.md"))), 2)
+
 
 class FmtTimeTests(unittest.TestCase):
     def test_formats(self) -> None:
@@ -1496,6 +1679,60 @@ class CliTests(unittest.TestCase):
         raw = (out / "chatgpt-crlf.md").read_bytes()
         self.assertNotIn(b"\r", raw)
         self.assertIn("第一行\n第二行".encode("utf-8"), raw)
+
+    def test_local_discovery_list_redacts_titles_ids_and_paths_in_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "private-root"
+            root.mkdir()
+            secret_path = root / "private-session-name.jsonl"
+            secret_path.write_text(json.dumps({
+                "type": "response_item", "timestamp": "2026-08-01T10:00:00Z",
+                "payload": {"type": "message", "role": "user", "id": "private-session-id",
+                            "content": [{"type": "input_text", "text": "private first body"}]},
+            }), encoding="utf-8")
+            result = run_import("--source", "local", "--path", str(root), "--dry-run", "--yes",
+                                "--root", str(Path(td) / "out"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("发现 1 个本地会话", result.stdout)
+            for secret in ("private-session-name", "private-session-id", "private first body", str(secret_path)):
+                self.assertNotIn(secret, result.stdout)
+
+    def test_output_hardlinks_are_rejected_before_read_chmod_or_write(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root, out = Path(td), Path(td) / "out"
+            out.mkdir()
+            external = root / "external.md"
+            external.write_text("external content", encoding="utf-8")
+            os.chmod(external, 0o644)
+            target = out / "chatgpt-linked.md"
+            os.link(external, target)
+            conv = ("chatgpt", "linked", "title", "2026-08-01", [("user", None, "u", "inside")])
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run):
+                    with self.assertRaisesRegex(ic.ImportError_, "安全普通文件|导入器目录"):
+                        ic.write_conversation(conv, {}, out, dry_run=dry_run)
+                    self.assertEqual(external.read_text(encoding="utf-8"), "external content")
+                    self.assertEqual(os.stat(external).st_mode & 0o777, 0o644)
+
+            target.unlink()
+            state_external = root / "external-state.json"
+            state_external.write_text("{}", encoding="utf-8")
+            os.chmod(state_external, 0o644)
+            os.link(state_external, ic.imported_path(out))
+            with self.assertRaisesRegex(ic.ImportError_, "安全普通文件|导入器目录"):
+                ic.load_imported(out)
+            self.assertEqual(state_external.read_text(encoding="utf-8"), "{}")
+            self.assertEqual(os.stat(state_external).st_mode & 0o777, 0o644)
+
+            gitkeep_out = root / "gitkeep-out"
+            gitkeep_out.mkdir()
+            external_keep = root / "external-gitkeep"
+            external_keep.write_text("", encoding="utf-8")
+            os.chmod(external_keep, 0o644)
+            os.link(external_keep, gitkeep_out / ".gitkeep")
+            with self.assertRaisesRegex(ic.ImportError_, "导入器目录"):
+                ic.load_imported(gitkeep_out)
+            self.assertEqual(os.stat(external_keep).st_mode & 0o777, 0o644)
 
     def test_rendered_metadata_is_single_line_and_safe_ids_stay_readable(self) -> None:
         out = self._tmp()

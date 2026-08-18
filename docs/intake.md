@@ -2,7 +2,7 @@
 
 selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 AI 工具，先整理成同一种中性格式，AI 才能稳定地从中提炼 L1–L4。
 
-> **已有自动导入器**：把原始导出保留在仓库外的本机目录（不要放进 `input/`），运行 `python3 import_chats.py --source chatgpt|gemini|deepseek|local --path <导出>`；导入器会把 ChatGPT / Gemini / DeepSeek 导出与本地 Codex / Claude Code 会话整理成下面的统一 Markdown 写入 `input/`（本地来源先 dry-run 清单、确认后写入）。Gemini 按每次 `Prompted` 活动拆分；ChatGPT 在 `current_node` 有效时只保留活动路径，只有它缺失、或引用格式正确但所指节点已不存在时才保留并拆分已验证的根到叶分支；非标量、空白等格式非法的引用会拒绝并报告。DeepSeek 的分支会拆成独立会话。活动边界或本地 JSONL 来源无法可靠识别时，导入器会停止该输入而非猜测；本地混合目录可用 `--local-format auto|codex|claude` 指定。本文档的整理说明保留为手工 fallback。
+> **已有自动导入器**：把原始导出保留在仓库外的本机目录（不要放进 `input/`），运行 `python3 import_chats.py --source chatgpt|gemini|deepseek|local --path <导出>`；导入器会把 ChatGPT / Gemini / DeepSeek 导出与本地 Codex / Claude Code 会话整理成下面的统一 Markdown 写入 `input/`（本地来源先 dry-run 清单、确认后写入）。Gemini 按每次 `Prompted` 活动拆分；ChatGPT 在 `current_node` 有效时只保留活动路径，只有字段缺失或为 `null` 时才保留并拆分已验证的根到叶分支；字段存在但格式非法或所指节点不存在会拒绝并报告。DeepSeek 的分支会拆成独立会话。活动边界或本地 JSONL 来源无法可靠识别时，导入器会停止该输入而非猜测；本地混合目录可用 `--local-format auto|codex|claude` 指定。本文档的整理说明保留为手工 fallback。
 
 ## 格式约定
 
@@ -46,7 +46,7 @@ selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 A
 3. 用任意 JSON 工具读 `conversations-*.json`：每个元素是一条对话，字段含 `title`（会话标题）、`create_time`、`mapping`（消息树）。`mapping` 里每个节点的 `message.author.role` 区分 `user` / `assistant`，`message.content.parts` 是正文，`message.create_time` 是时间。
 4. 按 `title` 一个会话一个文件，把 `user` / `assistant` 轮次整理成统一 Markdown。
 
-自动导入时，`current_node` 有效就仅保留该活动分支；只有它缺失、或引用格式正确但所指节点已不存在时，才保留并拆分已验证的根到叶分支；非标量、空白等格式非法的引用会拒绝并报告。图片变成 `[图片]`，未知结构化内容变成 `[未识别附件]`，不会把资产地址或原始字典写进 Markdown。
+自动导入时，`current_node` 有效就仅保留该活动分支；只有字段缺失或为 `null` 时，才保留并拆分已验证的根到叶分支；字段存在但格式非法或所指节点不存在会拒绝并报告。图片变成 `[图片]`，未知结构化内容变成 `[未识别附件]`，不会把资产地址或原始字典写进 Markdown。
 
 ### Gemini（Google Takeout「我的活动」导出）
 
