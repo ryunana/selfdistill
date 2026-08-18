@@ -198,15 +198,27 @@ def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
                 raise ImportError_("会话 mapping 的 parent/children 不一致")
         if set(normalized_declared) != set(children[nid]):
             raise ImportError_("会话 mapping 的 parent/children 不一致")
+    # Validate parent-chain termination with iterative three-color traversal.
+    # Every node and parent edge is processed once, including disconnected
+    # cycles that do not touch the one declared root.
+    colors: dict[str, int] = {nid: 0 for nid in nodes}  # 0 unseen, 1 visiting, 2 done
     for start in nodes:
-        seen = set()
+        if colors[start] == 2:
+            continue
+        trail: list[str] = []
         nid: Optional[str] = start
         while nid is not None:
-            if nid in seen:
+            color = colors[nid]
+            if color == 1:
                 raise ImportError_("会话 mapping 存在循环")
-            seen.add(nid)
+            if color == 2:
+                break
+            colors[nid] = 1
+            trail.append(nid)
             parent = nodes[nid].get("parent")
             nid = str(parent) if parent is not None else None
+        for visited in trail:
+            colors[visited] = 2
     leaves = sorted(nid for nid, kids in children.items() if not kids)
     if not leaves:
         raise ImportError_("会话 mapping 没有叶子节点（可能存在循环）")

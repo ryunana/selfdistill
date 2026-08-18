@@ -81,6 +81,35 @@ class ParserTests(unittest.TestCase):
                 with self.assertRaises(ic.ImportError_):
                     ic._root_to_leaf_paths(invalid)
 
+    def test_path_helper_parent_validation_is_linear_for_long_chain_and_cycles(self) -> None:
+        count = 8000
+        parent_reads = {"count": 0}
+
+        class CountingNode(dict):
+            def get(self, key, default=None):
+                if key == "parent":
+                    parent_reads["count"] += 1
+                return super().get(key, default)
+
+        chain = {
+            str(i): CountingNode({"parent": None if i == 0 else str(i - 1)})
+            for i in range(count)
+        }
+        paths = ic._root_to_leaf_paths(chain)
+        self.assertEqual(paths, [[str(i) for i in range(count)]])
+        # Roots, derived children, coloring, and the returned path each need
+        # one parent lookup per node; a quadratic ancestry walk exceeds this.
+        self.assertLess(parent_reads["count"], count * 6)
+
+        cycle_size = 4000
+        cycle = {"root": {"parent": None}}
+        cycle.update({
+            f"cycle-{i}": {"parent": f"cycle-{(i - 1) % cycle_size}"}
+            for i in range(cycle_size)
+        })
+        with self.assertRaisesRegex(ic.ImportError_, "会话 mapping 存在循环"):
+            ic._root_to_leaf_paths(cycle)
+
     def test_chatgpt_current_node_uses_parent_derived_children(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "conversations-000.json"
