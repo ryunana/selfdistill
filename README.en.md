@@ -103,7 +103,7 @@ python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--
 python3 import_chats.py --source local --path <directory> --local-format auto|codex|claude --dry-run
 ```
 
-The importer writes each Gemini `Prompted` activity separately and splits ChatGPT/DeepSeek branches into separate conversations instead of inventing one merged conversation. Images and authorized attachments become readable placeholders; model thinking, tool traces, and known local internal injections stay out of Markdown. `--dry-run` fully parses and reports planned new, updated, duplicate, and failed items without creating files. Exit code `0` means success (including expected internal exclusions), `2` partial success, and `1` fatal or all-failed input.
+The importer writes each Gemini `Prompted` activity separately. ChatGPT follows the active path when `current_node` is valid; only when it is absent or invalid does it preserve and split validated root-to-leaf branches. DeepSeek branches are separate conversations rather than one invented merge. Images and authorized attachments become readable placeholders; model thinking, tool traces, and known local internal injections stay out of Markdown. `--dry-run` fully parses and reports planned new, updated, duplicate, and failed items without creating files. Exit code `0` means success (including expected internal exclusions), `2` partial success, and `1` fatal or all-failed input.
 
 | Source | Export entry (quick reference) | Auto import |
 |--------|-------------------------------|-------------|

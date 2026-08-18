@@ -180,14 +180,15 @@ def _root_to_leaf_paths(mapping: dict) -> list[list[str]]:
             raise ImportError_("会话 mapping 存在断链")
         children[parent].append(nid)
     for nid, node in nodes.items():
-        raw_declared = node.get("children")
-        if raw_declared is None:
-            declared = []
-        elif isinstance(raw_declared, list):
-            declared = raw_declared
-        else:
+        # ChatGPT exports commonly omit children entirely (or set it null).
+        # In that case parent links are authoritative; an explicit list remains
+        # a strict bidirectional declaration, including an explicit empty list.
+        if "children" not in node or node.get("children") is None:
+            continue
+        raw_declared = node["children"]
+        if not isinstance(raw_declared, list):
             raise ImportError_("会话 mapping 的 children 不是列表")
-        normalized_declared = [str(child) for child in declared]
+        normalized_declared = [str(child) for child in raw_declared]
         if len(normalized_declared) != len(set(normalized_declared)):
             raise ImportError_("会话 mapping 的 children 存在重复引用")
         for child in normalized_declared:
@@ -327,8 +328,11 @@ def parse_chatgpt(path: Path) -> tuple:
             current = conv.get("current_node")
             has_valid_current = bool(current and str(current) in mapping)
             try:
+                # Validate the whole graph first.  A current_node selects the
+                # active path; it never excuses malformed inactive branches.
+                fallback_paths = _root_to_leaf_paths(mapping)
                 paths = ([_path_to_node(mapping, str(current))]
-                         if has_valid_current else _root_to_leaf_paths(mapping))
+                         if has_valid_current else fallback_paths)
             except ImportError_ as e:
                 skipped.append(("—", "会话 mapping 结构损坏"))
                 continue
@@ -1167,11 +1171,16 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                     if events is not None:
                         events.append(f"结构损坏 JSONL 行：Claude 第 {i} 行 message 不是对象")
                     continue
-                raw_role = m.get("role", dtype)
+                explicit_role = m.get("role")
+                raw_role = dtype if explicit_role is None else explicit_role
                 role = raw_role.lower() if isinstance(raw_role, str) else ""
                 if role not in ("user", "assistant"):
                     if events is not None:
                         events.append("未知 Claude 消息角色")
+                    continue
+                if explicit_role is not None and role != dtype:
+                    if events is not None:
+                        events.append("Claude 消息角色冲突")
                     continue
                 content = m.get("content")
                 if content is not None and not isinstance(content, (str, list)):
@@ -1271,6 +1280,19 @@ def _is_valid_imported_state(path: Path) -> bool:
     return True
 
 
+def _header_ownership_metadata(content: str) -> Optional[tuple[str, str]]:
+    """Read ownership comments only from the canonical header before messages."""
+    begin = "<!-- distill-messages:begin -->"
+    if content.count(begin) != 1:
+        return None
+    header = content.split(begin, 1)[0]
+    sources = re.findall(r"^<!-- source: (.*?) -->\s*$", header, re.MULTILINE)
+    cids = re.findall(r"^<!-- conversation_id: (.*?) -->\s*$", header, re.MULTILINE)
+    if len(sources) != 1 or len(cids) != 1:
+        return None
+    return sources[0], cids[0]
+
+
 def _is_managed_markdown(path: Path) -> bool:
     if path.is_symlink() or not path.is_file() or path.suffix != ".md":
         return False
@@ -1278,11 +1300,9 @@ def _is_managed_markdown(path: Path) -> bool:
         content = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    sources = re.findall(r"^<!-- source: (.*?) -->\s*$", content, re.MULTILINE)
-    cids = re.findall(r"^<!-- conversation_id: (.*?) -->\s*$", content, re.MULTILINE)
     begin = "<!-- distill-messages:begin -->"
     end = "<!-- distill-messages:end -->"
-    return (len(sources) == 1 and len(cids) == 1 and content.count(begin) == 1
+    return (_header_ownership_metadata(content) is not None and content.count(begin) == 1
             and content.count(end) == 1 and content.find(begin) < content.find(end))
 
 
@@ -1390,8 +1410,15 @@ def _render_messages(msgs: list) -> str:
 def _escape_managed_markers(text: str) -> str:
     """Keep user text visible without allowing it to forge writer delimiters."""
     text = _normalize_message_text(text)
-    return (text.replace("<!-- distill-messages:begin -->", "&lt;!-- distill-messages:begin --&gt;")
+    text = (text.replace("<!-- distill-messages:begin -->", "&lt;!-- distill-messages:begin --&gt;")
                 .replace("<!-- distill-messages:end -->", "&lt;!-- distill-messages:end --&gt;"))
+
+    def escape_ownership(match: re.Match) -> str:
+        return match.group(0).replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+
+    # Ownership-looking comments are controls only in the canonical header;
+    # render such text inert in bodies without escaping unrelated comments.
+    return re.sub(r"<!--\s*(?:source|conversation_id):[^\r\n]*?-->", escape_ownership, text)
 
 
 def _markdown_metadata(value) -> str:
@@ -1434,11 +1461,10 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
     if not path.exists():
         return
     content = path.read_text(encoding="utf-8")
-    old_sources = re.findall(r"^<!-- source: (.*?) -->\s*$", content, re.MULTILINE)
-    old_cids = re.findall(r"^<!-- conversation_id: (.*?) -->\s*$", content, re.MULTILINE)
-    if len(old_sources) != 1 or len(old_cids) != 1:
+    ownership = _header_ownership_metadata(content)
+    if ownership is None:
         raise ImportError_("文件名冲突：现有目标缺少或重复所有权元数据")
-    if (old_sources[0], old_cids[0]) != (_markdown_metadata(source), _markdown_metadata(cid)):
+    if ownership != (_markdown_metadata(source), _markdown_metadata(cid)):
         raise ImportError_("文件名冲突：现有目标所有权不匹配")
 
 

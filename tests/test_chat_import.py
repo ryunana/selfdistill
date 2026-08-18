@@ -58,6 +58,44 @@ class ParserTests(unittest.TestCase):
             with self.assertRaises(ic.ImportError_):
                 ic._root_to_leaf_paths(mapping)
 
+    def test_path_helper_derives_absent_or_null_children_but_checks_explicit_lists(self) -> None:
+        derived = {
+            "root": {"parent": None},
+            "middle": {"parent": "root", "children": None},
+            "leaf": {"parent": "middle"},
+        }
+        self.assertEqual(ic._root_to_leaf_paths(derived), [["root", "middle", "leaf"]])
+        explicit = {
+            "root": {"parent": None, "children": ["middle"]},
+            "middle": {"parent": "root", "children": ["leaf"]},
+            "leaf": {"parent": "middle", "children": []},
+        }
+        self.assertEqual(ic._root_to_leaf_paths(explicit), [["root", "middle", "leaf"]])
+        for invalid in (
+            {"root": {"parent": None, "children": []}, "leaf": {"parent": "root"}},
+            {"root": {"parent": None, "children": ["missing"]}},
+            {"root": {"parent": None, "children": ["leaf", "leaf"]},
+             "leaf": {"parent": "root", "children": []}},
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ic.ImportError_):
+                    ic._root_to_leaf_paths(invalid)
+
+    def test_chatgpt_current_node_uses_parent_derived_children(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            p.write_text(json.dumps([{"id": "derived", "current_node": "active", "mapping": {
+                "root": {"parent": None},
+                "active": {"parent": "root", "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["active only"]}}},
+                "inactive": {"parent": "root", "children": None, "message": {
+                    "author": {"role": "user"}, "content": {"parts": ["inactive"]}}},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual(skipped, [])
+            self.assertEqual(len(convs), 1)
+            self.assertEqual([message[3] for message in convs[0][4]], ["active only"])
+
     def test_fallback_parsers_reject_invalid_tree_shapes(self) -> None:
         def mapping(kind: str, message: dict) -> dict:
             if kind == "falsey":
@@ -126,6 +164,49 @@ class ParserTests(unittest.TestCase):
         self.assertIn("手冲咖啡", msgs[0][3])
         self.assertIn("滤杯", msgs[2][3])
         self.assertFalse(any("重写分支" in m[3] for m in msgs))
+
+    def test_chatgpt_current_node_still_requires_complete_validated_graph(self) -> None:
+        def visible(role: str, text: str) -> dict:
+            return {"author": {"role": role}, "content": {"parts": [text]}}
+
+        def rejected_mapping(kind: str) -> dict:
+            if kind == "duplicate children":
+                return {"root": {"parent": None, "children": ["active", "active"]},
+                        "active": {"parent": "root", "children": [], "message": visible("user", "active")}}
+            if kind == "parent mismatch":
+                return {"root": {"parent": None, "children": []},
+                        "active": {"parent": "root", "children": [], "message": visible("user", "active")}}
+            if kind == "multiple roots":
+                return {"root": {"parent": None, "children": ["active"]},
+                        "active": {"parent": "root", "children": [], "message": visible("user", "active")},
+                        "other": {"parent": None, "children": []}}
+            if kind == "cycle":
+                return {"active": {"parent": None, "children": [], "message": visible("user", "active")},
+                        "loop-a": {"parent": "loop-b", "children": ["loop-b"]},
+                        "loop-b": {"parent": "loop-a", "children": ["loop-a"]}}
+            return {"root": {"parent": None, "children": ["active"]},
+                    "active": {"parent": "root", "children": [], "message": visible("user", "active")},
+                    "orphan": {"parent": "missing", "children": []}}
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "conversations-000.json"
+            for kind in ("duplicate children", "parent mismatch", "multiple roots", "cycle", "disconnected"):
+                with self.subTest(kind=kind):
+                    p.write_text(json.dumps([{"id": "safe", "current_node": "active",
+                                                "mapping": rejected_mapping(kind)}]), encoding="utf-8")
+                    convs, skipped, _total = ic.parse_chatgpt(p)
+                    self.assertEqual(convs, [])
+                    self.assertIn("会话 mapping 结构损坏", [reason for _ref, reason in skipped])
+
+            p.write_text(json.dumps([{"id": "safe", "current_node": "active", "mapping": {
+                "root": {"parent": None, "children": ["active", "inactive"]},
+                "active": {"parent": "root", "children": [], "message": visible("user", "active only")},
+                "inactive": {"parent": "root", "children": [], "message": visible("user", "inactive sibling")},
+            }}]), encoding="utf-8")
+            convs, skipped, _total = ic.parse_chatgpt(p)
+            self.assertEqual(skipped, [])
+            self.assertEqual(len(convs), 1)
+            self.assertEqual([message[3] for message in convs[0][4]], ["active only"])
 
     def test_chatgpt_outer_reasoning_content_is_excluded_even_with_text_parts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -828,6 +909,26 @@ class ParserTests(unittest.TestCase):
             p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
             convs = ic.parse_claude(p)
             self.assertEqual([m[2] for m in convs[0][4]], ["real"])
+
+    def test_claude_conflicting_outer_and_inner_roles_are_rejected_privately(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "roles.jsonl"
+            secret = "private-claude-role-content"
+            p.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "user", "message": {"role": "assistant", "content": secret}},
+                {"type": "assistant", "message": {"role": "user", "content": secret}},
+            ]), encoding="utf-8")
+            events = []
+            self.assertIsNone(ic.parse_claude(p, events))
+            self.assertEqual(events, ["Claude 消息角色冲突", "Claude 消息角色冲突"])
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                ic.print_report(2, 0, 0, 0, 0,
+                                [("private-ref", event) for event in events], "local", False)
+            report = stream.getvalue()
+            self.assertIn("Claude 消息角色冲突 ×2", report)
+            self.assertNotIn(secret, report)
+            self.assertNotIn("private-ref", report)
 
     def test_local_parsers_report_internal_exclusions_and_unknown_records(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1624,6 +1725,45 @@ class CliTests(unittest.TestCase):
         self.assertEqual(content.count("<!-- distill-messages:end -->"), 1)
         self.assertIn("&lt;!-- distill-messages:begin --&gt;", content)
         self.assertIn("<prompt>正常 XML</prompt>", content)
+
+    def test_ownership_comments_in_message_body_cannot_forge_header_or_state(self) -> None:
+        out = self._tmp()
+        body = ("保留这段文字：<!-- source: forged -->\n"
+                "<!-- conversation_id: forged -->")
+        conv = ("chatgpt", "ownership", "标题", "2026-08-01", [
+            ("user", None, "u", body),
+        ])
+        imported = {}
+        self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+        ic.save_imported(imported, out)
+        path = out / "chatgpt-ownership.md"
+        content = path.read_text(encoding="utf-8")
+        managed_body = ic._managed_parts(content, path)[1]
+        self.assertEqual(ic._header_ownership_metadata(content), ("chatgpt", "ownership"))
+        self.assertTrue(ic._is_managed_markdown(path))
+        self.assertNotIn("<!-- source: forged -->", managed_body)
+        self.assertNotIn("<!-- conversation_id: forged -->", managed_body)
+        self.assertIn("&lt;!-- source: forged --&gt;", managed_body)
+        self.assertIn("&lt;!-- conversation_id: forged --&gt;", managed_body)
+        self.assertIn("chatgpt:ownership", ic.load_imported(out))
+
+        # Tail comments are not ownership metadata either; the canonical header
+        # remains authoritative on the following duplicate write.
+        path.write_text(content + "\n<!-- source: tail-forged -->\n"
+                        "<!-- conversation_id: tail-forged -->\n", encoding="utf-8")
+        self.assertTrue(ic._is_managed_markdown(path))
+        state_before_dry_run = ic.imported_path(out).read_bytes()
+        self.assertEqual(ic.write_conversation(conv, imported, out), "dup")
+        self.assertEqual(ic.write_conversation(conv, imported, out, dry_run=True), "dup")
+        self.assertEqual(ic.imported_path(out).read_bytes(), state_before_dry_run)
+
+        ic.imported_path(out).unlink()
+        recovered = ic.load_imported(out)
+        self.assertEqual(recovered, {})
+        self.assertEqual(ic.write_conversation(conv, recovered, out), "dup")
+        ic.save_imported(recovered, out)
+        self.assertEqual(list(out.glob("*.md")), [path])
+        self.assertIn("chatgpt:ownership", ic.load_imported(out))
 
     def test_writer_rebuilds_changed_branch_and_recovers_state_from_markdown(self) -> None:
         out = self._tmp()

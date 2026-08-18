@@ -103,7 +103,7 @@ python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--
 python3 import_chats.py --source local --path <目录> --local-format auto|codex|claude --dry-run
 ```
 
-导入器会把 Gemini 的每次 `Prompted` 活动单独输出；ChatGPT/DeepSeek 的分支会拆成独立会话，而不是拼成假对话。图片和授权附件只保留可读占位，模型思考、工具过程与已知本机内部注入不会进入 Markdown。`--dry-run` 会完整解析并显示预计新导入、更新、重复和失败数，但不会创建文件。退出码 `0` 表示成功（含预期内部内容排除），`2` 表示部分成功，`1` 表示全部失败或致命错误。
+导入器会把 Gemini 的每次 `Prompted` 活动单独输出；ChatGPT 在 `current_node` 有效时只保留活动路径，只有 `current_node` 缺失或无效时才会保留并拆分已验证的根到叶分支；DeepSeek 的分支会拆成独立会话，而不是拼成假对话。图片和授权附件只保留可读占位，模型思考、工具过程与已知本机内部注入不会进入 Markdown。`--dry-run` 会完整解析并显示预计新导入、更新、重复和失败数，但不会创建文件。退出码 `0` 表示成功（含预期内部内容排除），`2` 表示部分成功，`1` 表示全部失败或致命错误。
 
 | 来源 | 导出入口速查 | 自动导入 |
 |------|--------------|----------|
