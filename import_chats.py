@@ -155,6 +155,21 @@ def _make_conversation(source: str, cid: str, title: str, msgs: list) -> tuple:
     return (source, cid, title, exported_at, msgs)
 
 
+_BRANCH_LINEAGES: dict[tuple[str, str], tuple[str, tuple[str, ...]]] = {}
+_BRANCH_LINEAGES_BY_MESSAGES: dict[tuple[str, tuple[str, ...]], tuple[str, tuple[str, ...]]] = {}
+_BRANCH_LINEAGES_BY_CID_MESSAGES: dict[tuple[str, str, tuple[str, ...]], tuple[str, tuple[str, ...]]] = {}
+
+
+def _clear_branch_lineages(source: str) -> None:
+    """Keep parser-local lineage hints from crossing independent exports."""
+    for key in [key for key in _BRANCH_LINEAGES if key[0] == source]:
+        del _BRANCH_LINEAGES[key]
+    for key in [key for key in _BRANCH_LINEAGES_BY_MESSAGES if key[0] == source]:
+        del _BRANCH_LINEAGES_BY_MESSAGES[key]
+    for key in [key for key in _BRANCH_LINEAGES_BY_CID_MESSAGES if key[0] == source]:
+        del _BRANCH_LINEAGES_BY_CID_MESSAGES[key]
+
+
 def _sanitize_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "conversation"
 
@@ -181,6 +196,27 @@ def _stable_branch_cids(base: str, outputs: list[tuple[list[str], list]],
                 alternatives.append(nid)
         cids.append(base if not alternatives else f"{base}--branch-{_path_fingerprint(alternatives)}")
     return cids
+
+
+def _branch_lineage(path: list[str], children: dict[str, list[str]]) -> tuple[str, ...]:
+    return tuple(nid for index, nid in enumerate(path[1:], 1)
+                 if len(children.get(path[index - 1], ())) > 1)
+
+
+def _register_branch_lineage(source: str, cid: str, base: str, path: list[str], children: dict[str, list[str]],
+                             msgs: list) -> None:
+    metadata = (base, _branch_lineage(path, children))
+    message_ids = tuple(message[2] for message in msgs)
+    _BRANCH_LINEAGES[(source, cid)] = metadata
+    _BRANCH_LINEAGES_BY_MESSAGES[(source, message_ids)] = metadata
+    _BRANCH_LINEAGES_BY_CID_MESSAGES[(source, cid, message_ids)] = metadata
+
+
+def _branch_metadata(source: str, cid: str, msgs: list) -> Optional[tuple[str, tuple[str, ...]]]:
+    message_ids = tuple(message[2] for message in msgs)
+    return (_BRANCH_LINEAGES_BY_CID_MESSAGES.get((source, cid, message_ids))
+            or _BRANCH_LINEAGES.get((source, cid))
+            or _BRANCH_LINEAGES_BY_MESSAGES.get((source, message_ids)))
 
 
 def _graph_reference(value, *, allow_null: bool = False) -> Optional[str]:
@@ -322,9 +358,10 @@ def _chatgpt_parts(parts) -> tuple[str, int]:
 
 def parse_chatgpt(path: Path) -> tuple:
     """Use current_node, otherwise preserve each complete branch rather than flattening."""
+    _clear_branch_lineages("chatgpt")
     files = sorted(path.glob("conversations-*.json")) if path.is_dir() else [path]
     if not files:
-        raise ImportError_(f"未找到 conversations-*.json：{path}")
+        raise ImportError_("未找到 ChatGPT 会话导出；请确认导出目录后重试")
     convs = []
     skipped = []
     total = 0
@@ -453,6 +490,7 @@ def parse_chatgpt(path: Path) -> tuple:
                 if branching and cid != base:
                     title += "（分支）"
                 convs.append(_make_conversation("chatgpt", cid, title, msgs))
+                _register_branch_lineage("chatgpt", cid, base, node_path, children, msgs)
             if unknown_parts_by_node:
                 skipped.append(("—", f"未识别 ChatGPT 附件 {sum(unknown_parts_by_node.values())} 个"))
             if reasoning_nodes:
@@ -537,6 +575,11 @@ def _gemini_time(lines: list[str]) -> Optional[str]:
     return None
 
 
+def _gemini_safe_metadata_line(line: str) -> bool:
+    return bool(_TIME_FIELD.fullmatch(line) or _GEMINI_URL_LINE.match(line)
+                or _GEMINI_DROP_LINES.fullmatch(line))
+
+
 def _gemini_visible_text(lines: list[str], marker: str, metadata_indexes: Optional[set[int]] = None,
                          provider_indexes: Optional[set[int]] = None,
                          chrome_indexes: Optional[set[int]] = None) -> str:
@@ -546,7 +589,7 @@ def _gemini_visible_text(lines: list[str], marker: str, metadata_indexes: Option
     provider_indexes = provider_indexes or set()
     chrome_indexes = chrome_indexes or set()
     for index, line in enumerate(lines):
-        if index in metadata_indexes or index in chrome_indexes:
+        if index in metadata_indexes or (index in chrome_indexes and _gemini_safe_metadata_line(line)):
             continue
         if index in provider_indexes:
             line = marker_re.sub("", line).strip()
@@ -574,7 +617,7 @@ def _gemini_user_text(lines: list[str], provider_indexes: Optional[set[int]] = N
     for index, line in enumerate(lines):
         # The caller has already sliced away the one selected activity timestamp.
         # Date-like text inside a prompt is legitimate user content.
-        if index in chrome_indexes:
+        if index in chrome_indexes and _gemini_safe_metadata_line(line):
             continue
         if index in provider_indexes and re.match(r"^Prompted(?:\s*[:：]\s*|\s*$)", line, re.I):
             line = re.sub(r"^Prompted(?:\s*[:：]\s*|\s*$)", "", line, flags=re.I)
@@ -597,7 +640,7 @@ def _is_known_gemini_information_container(lines: list[str], structural_time_ind
     # text is chrome. Every non-chrome field must independently be safe
     # metadata; otherwise retain a static failure for review.
     non_chrome = [line for i, line in enumerate(lines) if i not in chrome_indexes]
-    if not non_chrome or not all(_TIME_FIELD.fullmatch(line) or _GEMINI_URL_LINE.fullmatch(line)
+    if not non_chrome or not all(_gemini_safe_metadata_line(line)
                                  for line in non_chrome):
         return False
     return sum(1 for i in chrome_indexes if _GEMINI_DROP_LINES.fullmatch(lines[i])) >= 5
@@ -619,13 +662,13 @@ def parse_gemini(path: Path) -> tuple:
         parser.feed(target.read_text(encoding="utf-8"))
         parser.close()
     except UnicodeDecodeError:
-        raise ImportError_(f"Gemini HTML UTF-8 解码失败：{target.name}")
-    except OSError as e:
-        raise ImportError_(f"无法读取 {target}：{e}")
+        raise ImportError_("Gemini HTML UTF-8 解码失败；请重新导出后重试")
+    except OSError:
+        raise ImportError_("无法读取 Gemini 活动文件；请确认导出完整后重试")
     if parser._depth != 0 or parser._tags:
         raise ImportError_("Gemini 活动容器未闭合，无法可靠解析（请改用手工整理）")
     if not parser.blocks:
-        raise ImportError_(f"{target} 未找到可靠的 Gemini 活动容器（请改用手工整理）")
+        raise ImportError_("未找到可靠的 Gemini 活动容器；请改用手工整理")
     activities = []
     skipped = []
     pending = None
@@ -634,7 +677,7 @@ def parse_gemini(path: Path) -> tuple:
                           if i in provider_indexes and (re.match(r"^Prompted(?:\s*[:：]|\s*$)", line, re.I)
                           or re.match(r"^Prompted\s+", line, re.I))]
         if len(prompt_indexes) > 1:
-            raise ImportError_(f"{target} 存在多个结构化 Prompted 标记，无法可靠绑定活动（请改用手工整理）")
+            raise ImportError_("Gemini 存在多个结构化 Prompted 标记，无法可靠绑定活动；请改用手工整理")
         is_prompt = bool(prompt_indexes)
         is_legacy_answer = any(i in provider_indexes and re.match(r"^Gemini(?:\s*[:：]|\s*$)", line, re.I)
                                for i, line in enumerate(lines))
@@ -647,7 +690,7 @@ def parse_gemini(path: Path) -> tuple:
             # Bind only direct content-cell/body-1 timestamp fields. Dates in
             # nested answer markup (or in user fields) remain visible text.
             if len(timestamp_indexes) > 1:
-                raise ImportError_(f"{target} 存在多个结构化活动时间，无法可靠绑定 Prompted 活动（请改用手工整理）")
+                raise ImportError_("Gemini 存在多个结构化活动时间，无法可靠绑定 Prompted 活动；请改用手工整理")
             timestamp_index = timestamp_indexes[0] if timestamp_indexes else None
             legacy_timestamp_indexes = [i for i in structural_time_indexes if i <= prompt_index
                                         and _TIME_FIELD.fullmatch(lines[i])]
@@ -661,7 +704,7 @@ def parse_gemini(path: Path) -> tuple:
                 {i - prompt_index for i in chrome_indexes if prompt_index <= i < end_index})
             timestamp = _gemini_time([lines[timestamp_index]]) if timestamp_index is not None else legacy_time
             if not timestamp or not text:
-                raise ImportError_(f"{target} 存在无法可靠绑定时间或正文的 Prompted 活动（请改用手工整理）")
+                raise ImportError_("Gemini 存在无法可靠绑定时间或正文的 Prompted 活动；请改用手工整理")
             activity = {"time": timestamp, "user": text, "answer": None}
             if timestamp_index is not None:
                 answer_start = timestamp_index + 1
@@ -675,7 +718,7 @@ def parse_gemini(path: Path) -> tuple:
                 pending = activity
         elif is_legacy_answer:
             if pending is None:
-                raise ImportError_(f"{target} 存在未绑定 Prompted 的 Gemini 回答（请改用手工整理）")
+                raise ImportError_("Gemini 存在未绑定 Prompted 的回答；请改用手工整理")
             answer = _gemini_visible_text(lines, "Gemini", structural_time_indexes, provider_indexes, chrome_indexes)
             if answer:
                 pending["answer"] = answer
@@ -689,7 +732,7 @@ def parse_gemini(path: Path) -> tuple:
     if pending is not None:
         activities.append(pending)
     if not activities:
-        raise ImportError_(f"{target} 未提取到任何 Prompted 活动")
+        raise ImportError_("未提取到任何 Gemini Prompted 活动；请确认导出完整")
     convs = []
     activity_occurrences: dict[str, int] = {}
     for activity in sorted(activities, key=lambda a: (a["time"], a["user"])):
@@ -711,6 +754,7 @@ def parse_gemini(path: Path) -> tuple:
 
 def parse_deepseek(path: Path) -> tuple:
     """conversations.json（或 zip）：mapping 树 + fragments（REQUEST/RESPONSE/THINK/FILE）。"""
+    _clear_branch_lineages("deepseek")
     data = None
     if path.is_dir():
         files = sorted(path.rglob("conversations.json"))
@@ -737,8 +781,8 @@ def parse_deepseek(path: Path) -> tuple:
     else:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-            raise ImportError_(f"无法读取 {path}：{e}")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            raise ImportError_("无法读取 DeepSeek 导出；请确认文件完整后重试")
 
     if not isinstance(data, list):
         raise ImportError_("conversations.json 顶层必须是会话列表")
@@ -873,6 +917,7 @@ def parse_deepseek(path: Path) -> tuple:
             if branching and cid != base:
                 title += "（分支）"
             convs.append(_make_conversation("deepseek", cid, title, msgs))
+            _register_branch_lineage("deepseek", cid, base, node_path, children, msgs)
     if tool_count:
         skipped.append(("—", f"工具片段 {tool_count} 条（SEARCH/TOOL_SEARCH/TOOL_OPEN）已识别，不纳入蒸馏正文"))
     return convs, skipped, total
@@ -1071,6 +1116,26 @@ _CODEX_KNOWN_RESPONSE_PAYLOAD_TYPES = {
 }
 
 
+def _codex_ambiguous_visible_message(payload, record: dict, ordinal: int,
+                                     events: Optional[list[str]]) -> Optional[tuple]:
+    if not isinstance(payload, dict):
+        return None
+    role = payload.get("role")
+    if not isinstance(role, str) or role.lower() not in ("user", "assistant"):
+        return None
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return None
+    text = _codex_text_with_events(content, events)
+    if role.lower() == "user":
+        text = _clean_codex_user(text, events)
+    if not text:
+        return None
+    normalized_role = role.lower()
+    mid = _safe_scalar(payload.get("id")) or _occurrence_id(normalized_role, record.get("timestamp"), ordinal, text)
+    return (normalized_role, fmt_time(record.get("timestamp")), mid, text)
+
+
 def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list]:
     cid = _codex_session_id(path)
     msgs: list = []
@@ -1103,6 +1168,9 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
                 if top_type != "response_item":
                     if events is not None:
                         events.append("未知 Codex 顶层记录类型")
+                    visible = _codex_ambiguous_visible_message(d.get("payload"), d, i, events)
+                    if visible is not None:
+                        msgs.append(visible)
                     continue
                 raw_payload = d.get("payload")
                 if raw_payload is not None and not isinstance(raw_payload, dict):
@@ -1123,6 +1191,9 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
                 if payload_type != "message":
                     if events is not None:
                         events.append("未知 Codex 响应记录类型")
+                    visible = _codex_ambiguous_visible_message(payload, d, i, events)
+                    if visible is not None:
+                        msgs.append(visible)
                     continue
                 raw_role = payload.get("role")
                 role = raw_role.lower() if isinstance(raw_role, str) else ""
@@ -1267,6 +1338,19 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
                             events.append("内部内容已排除：Claude 已知非消息记录")
                         else:
                             events.append("未知 Claude 顶层记录类型")
+                    if dtype not in _CLAUDE_KNOWN_NON_MESSAGE_TYPES:
+                        raw_message = d.get("message")
+                        if isinstance(raw_message, dict):
+                            raw_role = raw_message.get("role")
+                            content = raw_message.get("content")
+                            if (isinstance(raw_role, str) and raw_role.lower() in ("user", "assistant")
+                                    and isinstance(content, (str, list))):
+                                text, _handled = _claude_content_text(content, events)
+                                if text:
+                                    role = raw_role.lower()
+                                    mid = (_safe_scalar(d.get("uuid"))
+                                           or _occurrence_id(role, d.get("timestamp"), i, text))
+                                    msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
                     continue
                 raw_message = d.get("message")
                 if raw_message is not None and not isinstance(raw_message, dict):
@@ -1315,7 +1399,14 @@ def parse_claude(path: Path, events: Optional[list[str]] = None) -> Optional[lis
         raise ImportError_("Claude JSONL UTF-8 解码失败")
     if not msgs:
         return None
-    cid = next(iter(session_ids)) if session_ids else path.stem
+    if session_ids:
+        cid = next(iter(session_ids))
+    else:
+        # Path names are not session identities.  The first visible message is
+        # append-stable and survives a session-log rename.
+        role, _time, mid, text = msgs[0]
+        cid = "fp-session-" + hashlib.sha1(
+            f"{role}|{mid}|{_normalize_message_text(text)}".encode("utf-8")).hexdigest()[:16]
     title = _first_user_snippet(msgs) or path.stem
     return [_make_conversation("claude", cid, title, msgs)]
 
@@ -1350,7 +1441,54 @@ def _atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
         except OSError:
             pass
         raise
-    os.chmod(path, mode)
+
+
+def _safe_regular_fd(path: Path) -> int:
+    """Open an existing output without following a post-check symlink swap."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise ImportError_("输出目标已变化，拒绝访问")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ImportError_("输出目标不是安全普通文件，拒绝写入")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_safe_text(path: Path) -> str:
+    fd = _safe_regular_fd(path)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        raise ImportError_("输出目标无法安全读取")
+
+
+def _chmod_safe_regular(path: Path, mode: int) -> None:
+    fd = _safe_regular_fd(path)
+    try:
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def _chmod_safe_directory(path: Path, mode: int) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise ImportError_("输出目录已变化，拒绝访问")
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise ImportError_("输出目录已变化，拒绝访问")
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
 
 
 def imported_path(out_dir: Path) -> Path:
@@ -1389,13 +1527,25 @@ def _validate_imported_state(data) -> dict:
                 or any(not isinstance(mid, str) or not mid for mid in message_ids)
                 or len(message_ids) != len(set(message_ids))):
             raise ImportError_("状态文件结构损坏，未修改（会话字段无效）")
+        has_base = "branch_base" in entry
+        has_lineage = "branch_lineage" in entry
+        if has_base != has_lineage:
+            raise ImportError_("状态文件结构损坏，未修改（分支字段不完整）")
+        if has_base:
+            base = entry["branch_base"]
+            lineage = entry["branch_lineage"]
+            if (not isinstance(base, str) or not base.strip()
+                    or not isinstance(lineage, list) or not lineage
+                    or any(not isinstance(item, str) or not item.strip() for item in lineage)
+                    or len(lineage) != len(set(lineage))):
+                raise ImportError_("状态文件结构损坏，未修改（分支字段无效）")
     return data
 
 
 def _is_valid_imported_state(path: Path) -> bool:
     try:
         _assert_single_link_regular(path, "状态文件不是安全普通文件，拒绝访问")
-        _validate_imported_state(json.loads(path.read_text(encoding="utf-8")))
+        _validate_imported_state(json.loads(_read_safe_text(path)))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ImportError_):
         return False
     return True
@@ -1422,8 +1572,8 @@ def _is_managed_markdown(path: Path) -> bool:
     except ImportError_:
         return False
     try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        content = _read_safe_text(path)
+    except (OSError, UnicodeDecodeError, ImportError_):
         return False
     begin = "<!-- distill-messages:begin -->"
     end = "<!-- distill-messages:end -->"
@@ -1523,8 +1673,8 @@ def load_imported(out_dir: Path) -> dict:
     p = imported_path(out_dir)
     if p.exists():
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = json.loads(_read_safe_text(p))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ImportError_):
             raise ImportError_("状态文件损坏或 UTF-8 解码失败，未修改")
         return _validate_imported_state(data)
     return {}
@@ -1533,7 +1683,7 @@ def load_imported(out_dir: Path) -> dict:
 def save_imported(imported: dict, out_dir: Path) -> None:
     _assert_safe_output_root(out_dir)
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(out_dir, 0o700)
+    _chmod_safe_directory(out_dir, 0o700)
     _atomic_write(imported_path(out_dir), json.dumps(imported, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -1579,11 +1729,21 @@ def _managed_parts(content: str, path: Path) -> tuple[str, str, str]:
     return before, body.strip("\n"), after
 
 
-def _state_entry(path: Path, title: str, msgs: list) -> dict:
-    return {
+def _state_entry(path: Path, title: str, msgs: list, source: Optional[str] = None,
+                 cid: Optional[str] = None,
+                 branch_metadata: Optional[tuple[str, tuple[str, ...]]] = None) -> dict:
+    entry = {
         "path": str(path), "imported_at": today_str(), "title": title,
         "message_ids": [m[2] for m in msgs],
     }
+    metadata = branch_metadata
+    if metadata is None and source is not None and cid is not None:
+        metadata = _branch_metadata(source, cid, msgs)
+    if metadata is not None and metadata[1]:
+        base, lineage = metadata
+        entry["branch_base"] = base
+        entry["branch_lineage"] = list(lineage)
+    return entry
 
 
 def _same_path(left, right) -> bool:
@@ -1635,7 +1795,7 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
     if not path.exists():
         return
     _assert_single_link_regular(path, "输出目标不是安全普通文件，拒绝写入")
-    content = path.read_text(encoding="utf-8")
+    content = _read_safe_text(path)
     ownership = _header_ownership_metadata(content)
     if ownership is None:
         raise ImportError_("文件名冲突：现有目标缺少或重复所有权元数据")
@@ -1643,16 +1803,89 @@ def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
         raise ImportError_("文件名冲突：现有目标所有权不匹配")
 
 
-def _claim_dry_run_output(conv: tuple, imported: dict, out_dir: Path) -> None:
+def _claim_dry_run_output(conv: tuple, imported: dict, out_dir: Path,
+                          branch_metadata: Optional[tuple[str, tuple[str, ...]]] = None) -> None:
     """Record an in-memory output claim so dry-run reports later collisions."""
     source, cid, title, _exported_at, msgs = conv
     path = _conversation_output_path(conv, out_dir)
-    imported[f"{source}:{cid}"] = _state_entry(path, title, msgs)
+    imported[f"{source}:{cid}"] = _state_entry(path, title, msgs, source, cid, branch_metadata)
+
+
+def _lineage_cid(base: str, lineage: tuple[str, ...]) -> str:
+    return f"{base}--branch-{_path_fingerprint(list(lineage) or ['root'])}"
+
+
+def _continue_branch_identities(convs: list, imported: dict, *,
+                                return_metadata: bool = False):
+    """Reuse a uniquely evidenced old branch ID before writing a changed tree."""
+    rewritten = list(convs)
+    # Snapshot parse-time lineage once.  Continuation changes CIDs, never the
+    # immutable path/message evidence that selected them.
+    metadata_by_index = {
+        index: _branch_metadata(conv[0], conv[1], conv[4])
+        for index, conv in enumerate(rewritten)
+    }
+    used: set[str] = set()
+    continued: set[int] = set()
+    # Longer message histories are more specific evidence and win first.
+    for index in sorted(range(len(rewritten)), key=lambda i: -len(rewritten[i][4])):
+        source, cid, title, exported_at, msgs = rewritten[index]
+        metadata = metadata_by_index[index]
+        if metadata is None:
+            continue
+        base, lineage = metadata
+        message_ids = {message[2] for message in msgs}
+        matches = []
+        for old_key, entry in imported.items():
+            if not old_key.startswith(f"{source}:") or not isinstance(entry, dict):
+                continue
+            old_cid = old_key.split(":", 1)[1]
+            if entry.get("branch_base", base) != base:
+                continue
+            if "branch_base" not in entry and old_cid != base and not old_cid.startswith(base + "--branch-"):
+                continue
+            old_ids = entry.get("message_ids")
+            if isinstance(old_ids, list) and old_ids and set(old_ids).issubset(message_ids):
+                matches.append((old_cid, entry))
+        if len(matches) > 1:
+            same_lineage = [match for match in matches if match[1].get("branch_lineage") == list(lineage)]
+            matches = same_lineage if len(same_lineage) == 1 else []
+        if len(matches) == 1 and f"{source}:{matches[0][0]}" not in used:
+            old_cid = matches[0][0]
+            rewritten[index] = (source, old_cid, title, exported_at, msgs)
+            used.add(f"{source}:{old_cid}")
+            continued.add(index)
+    # A state continuation may take today's provisional base. Give the newly
+    # introduced path its lineage identity rather than creating a duplicate key.
+    seen: dict[str, int] = {}
+    for index, conv in enumerate(rewritten):
+        source, cid, title, exported_at, msgs = conv
+        key = f"{source}:{cid}"
+        if key in seen:
+            target = seen[key] if index in continued and seen[key] not in continued else index
+            target_conv = rewritten[target]
+            source, cid, title, exported_at, msgs = target_conv
+            metadata = metadata_by_index[target]
+            if metadata is None or not metadata[1]:
+                continue
+            base, lineage = metadata
+            cid = _lineage_cid(base, lineage)
+            rewritten[target] = (source, cid, title, exported_at, msgs)
+            key = f"{source}:{cid}"
+        seen[key] = index
+    if not return_metadata:
+        return rewritten
+    resolved_metadata = {
+        (conv[0], conv[1], tuple(message[2] for message in conv[4])): metadata_by_index[index]
+        for index, conv in enumerate(rewritten)
+    }
+    return rewritten, resolved_metadata
 
 
 def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool = False,
                        *, _batch_prevalidated: bool = False,
-                       _path_owners: Optional[dict[str, str]] = None) -> str:
+                       _path_owners: Optional[dict[str, str]] = None,
+                       _branch_metadata: Optional[tuple[str, tuple[str, ...]]] = None) -> str:
     """Markdown is the source of truth; state is reconstructed from its final block."""
     source, cid, title, exported_at, msgs = conv
     if _batch_prevalidated:
@@ -1670,13 +1903,13 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
     desired = _render_messages(msgs)
     result = "new"
     if path.exists():
-        existing = path.read_text(encoding="utf-8")
+        existing = _read_safe_text(path)
         before, existing_body, after = _managed_parts(existing, path)
         if existing_body == desired:
             if not dry_run:
-                os.chmod(out_dir, 0o700)
-                os.chmod(path, 0o600)
-                imported[key] = _state_entry(path, title, msgs)
+                _chmod_safe_directory(out_dir, 0o700)
+                _chmod_safe_regular(path, 0o600)
+                imported[key] = _state_entry(path, title, msgs, source, cid, _branch_metadata)
             return "dup"
         result = "update"
         content = before + "<!-- distill-messages:begin -->\n" + desired + "\n<!-- distill-messages:end -->" + after
@@ -1685,9 +1918,9 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
     if dry_run:
         return result
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(out_dir, 0o700)
+    _chmod_safe_directory(out_dir, 0o700)
     _atomic_write(path, content)
-    imported[key] = _state_entry(path, title, msgs)
+    imported[key] = _state_entry(path, title, msgs, source, cid, _branch_metadata)
     return result
 
 
@@ -1728,9 +1961,9 @@ def discover_local(since: Optional[str] = None, excludes: tuple = (), roots: tup
                 continue
             try:
                 first_t, last_t, title = _peek(source, p)
-            except ImportError_ as e:
+            except ImportError_:
                 if failures is not None:
-                    failures.append((p.name, str(e)))
+                    failures.append(("—", "本地会话预览失败"))
                 continue
             if since and (last_t or first_t or "") < since:
                 continue
@@ -1844,6 +2077,7 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
     # Validate the complete root once for this batch.  Individual writes keep
     # path/target checks, while save_imported performs a final full recheck.
     _assert_safe_output_root(out_dir)
+    convs, branch_metadata = _continue_branch_identities(convs, imported, return_metadata=True)
     path_owners = _build_path_owner_index(imported)
     if total == 0 and not convs and not skipped:
         skipped.append(("导出文件", SKIP_EMPTY))
@@ -1853,16 +2087,18 @@ def import_convs(convs: list, skipped: list, total: int, imported: dict,
             skipped.append(("—", "写入失败：批次内重复会话键"))
             continue
         seen_keys.add(key)
+        metadata = branch_metadata.get((conv[0], conv[1], tuple(message[2] for message in conv[4])))
         try:
             result = write_conversation(conv, imported, out_dir, dry_run,
-                                        _batch_prevalidated=True, _path_owners=path_owners)
+                                        _batch_prevalidated=True, _path_owners=path_owners,
+                                        _branch_metadata=metadata)
         except (OSError, UnicodeDecodeError, ImportError_) as e:
             detail = str(e) if isinstance(e, ImportError_) else "输出写入失败"
             skipped.append(("—", f"写入失败：{detail}"))
             continue
         _claim_path_owner(path_owners, key, _conversation_output_path(conv, out_dir))
         if dry_run:
-            _claim_dry_run_output(conv, imported, out_dir)
+            _claim_dry_run_output(conv, imported, out_dir, metadata)
         if result == "dup":
             dup += 1
         elif result == "update":
@@ -1910,7 +2146,7 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
             convs = (parse_codex(Path(path), events) if source == "codex"
                      else parse_claude(Path(path), events))
         except ImportError_ as e:
-            bad.append((sid, str(e)))
+            bad.append(("—", str(e)))
             continue
         bad.extend((sid, reason) for reason in events)
         if not convs:
