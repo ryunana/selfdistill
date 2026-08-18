@@ -1096,9 +1096,11 @@ def _codex_session_id(path: Path) -> str:
                     continue
                 if d.get("type") == "session_meta":
                     payload = d.get("payload")
-                    pid = payload.get("id") if isinstance(payload, dict) else None
-                    if isinstance(pid, (str, int, float)) and not isinstance(pid, bool) and str(pid).strip():
-                        return str(pid)
+                    if isinstance(payload, dict) and "id" in payload:
+                        pid = _usable_conversation_id(payload["id"])
+                        if pid is None:
+                            raise ImportError_("Codex session ID 无效")
+                        return pid
                 break
     except (OSError, UnicodeDecodeError):
         pass
@@ -1422,9 +1424,26 @@ def _first_user_snippet(msgs: list) -> str:
 # ---------- 写入：权限 0700/0600 + 原子写入 + 增量去重 ----------
 
 def _atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    tmp = Path(tmp_name)
+    """Replace through one held, no-follow parent directory descriptor."""
+    parent_fd = _safe_directory_fd(path.parent)
+    tmp_name = None
+    fd = None
     try:
+        # The output directory itself is importer-owned and must remain private.
+        os.fchmod(parent_fd, 0o700)
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0))
+        for _attempt in range(32):
+            candidate = f".{path.name}.{os.urandom(16).hex()}.tmp"
+            try:
+                fd = os.open(candidate, flags, mode, dir_fd=parent_fd)
+                tmp_name = candidate
+                break
+            except FileExistsError:
+                continue
+            except OSError:
+                raise ImportError_("无法安全创建输出临时文件")
+        if fd is None or tmp_name is None:
+            raise ImportError_("无法安全创建输出临时文件")
         os.fchmod(fd, mode)
         f = os.fdopen(fd, "w", encoding="utf-8")
         fd = None
@@ -1432,15 +1451,21 @@ def _atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp_name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except OSError:
+            raise ImportError_("无法安全替换输出文件")
     except BaseException:
         if fd is not None:
             os.close(fd)
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
         raise
+    finally:
+        os.close(parent_fd)
 
 
 def _safe_regular_fd(path: Path) -> int:
@@ -1477,7 +1502,7 @@ def _chmod_safe_regular(path: Path, mode: int) -> None:
         os.close(fd)
 
 
-def _chmod_safe_directory(path: Path, mode: int) -> None:
+def _safe_directory_fd(path: Path) -> int:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
@@ -1486,6 +1511,15 @@ def _chmod_safe_directory(path: Path, mode: int) -> None:
     try:
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             raise ImportError_("输出目录已变化，拒绝访问")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _chmod_safe_directory(path: Path, mode: int) -> None:
+    fd = _safe_directory_fd(path)
+    try:
         os.fchmod(fd, mode)
     finally:
         os.close(fd)
@@ -1539,6 +1573,8 @@ def _validate_imported_state(data) -> dict:
                     or any(not isinstance(item, str) or not item.strip() for item in lineage)
                     or len(lineage) != len(set(lineage))):
                 raise ImportError_("状态文件结构损坏，未修改（分支字段无效）")
+            if state_cid != base and not state_cid.startswith(base + "--branch-"):
+                raise ImportError_("状态文件结构损坏，未修改（分支会话键无效）")
     return data
 
 
@@ -1961,13 +1997,14 @@ def discover_local(since: Optional[str] = None, excludes: tuple = (), roots: tup
                 continue
             try:
                 first_t, last_t, title = _peek(source, p)
+                sid = _session_id(source, p)
             except ImportError_:
                 if failures is not None:
                     failures.append(("—", "本地会话预览失败"))
                 continue
             if since and (last_t or first_t or "") < since:
                 continue
-            found.append((source, _session_id(source, p), title, first_t, last_t, size, str(p)))
+            found.append((source, sid, title, first_t, last_t, size, str(p)))
     return found
 
 
@@ -2257,12 +2294,13 @@ def discover_local_path(root: Path, since: Optional[str], excludes: tuple, force
             source = _classify_local_file(path, forced)
             size = path.stat().st_size
             first_t, last_t, title = _peek(source, path)
+            sid = _session_id(source, path)
         except (ImportError_, OSError) as e:
             failures.append(("—", str(e) if isinstance(e, ImportError_) else "本地会话读取失败"))
             continue
         if since and (last_t or first_t or "") < since:
             continue
-        found.append((source, _session_id(source, path), title, first_t, last_t, size, str(path)))
+        found.append((source, sid, title, first_t, last_t, size, str(path)))
     return found, failures
 
 
@@ -2295,8 +2333,11 @@ def main() -> int:
                 ap.error(f"--source {args.source} 需要 --path")
             path_arg = args.path
         total, outputs, new, updated, dup, skipped = run_source(args.source, path_arg, args, imported, out_dir)
-    except (ImportError_, OSError) as e:
+    except ImportError_ as e:
         print(f"错误：{e}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("错误：本地文件操作失败；请检查权限和输出目录后重试", file=sys.stderr)
         return 1
 
     if any(reason == SKIP_CANCELLED for _ref, reason in skipped):

@@ -10,7 +10,7 @@ import tempfile
 import unittest
 import unittest.mock
 import zipfile
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 
@@ -920,7 +920,8 @@ class ParserTests(unittest.TestCase):
             ]), encoding="utf-8")
             _first, _last, title = ic._peek("codex", codex)
             self.assertEqual(title, "")
-            self.assertEqual(ic._codex_session_id(codex), "fallback")
+            with self.assertRaisesRegex(ic.ImportError_, "Codex session ID 无效"):
+                ic._codex_session_id(codex)
 
             claude = root / "claude-preview.jsonl"
             claude.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": [
@@ -963,9 +964,8 @@ class ParserTests(unittest.TestCase):
                     "content": [{"type": "input_text", "text": "codex visible"}],
                 }},
             ]), encoding="utf-8")
-            cx = ic.parse_codex(codex)[0]
-            self.assertEqual(cx[1], "codex")
-            self.assertTrue(cx[4][0][2].startswith("fp-"))
+            with self.assertRaisesRegex(ic.ImportError_, "Codex session ID 无效"):
+                ic.parse_codex(codex)
 
             claude = root / "claude.jsonl"
             claude.write_text(json.dumps({"type": "user", "uuid": {"secret": secret}, "message": {
@@ -976,8 +976,7 @@ class ParserTests(unittest.TestCase):
 
             out = root / "out"
             imported = {}
-            for conv in (cx, cl):
-                self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+            self.assertEqual(ic.write_conversation(cl, imported, out), "new")
             rendered = "\n".join(path.read_text(encoding="utf-8") for path in out.glob("*.md"))
             self.assertNotIn(secret, rendered)
             self.assertNotIn(secret, json.dumps(imported, ensure_ascii=False))
@@ -1765,6 +1764,31 @@ class ParserTests(unittest.TestCase):
                     ic._validate_imported_state({"chatgpt:x": entry})
                 self.assertNotIn("private", str(raised.exception))
 
+    def test_imported_branch_metadata_cannot_claim_an_unrelated_state_key(self) -> None:
+        entry = {"path": "x.md", "imported_at": "2026-08-01", "title": "x", "message_ids": ["m"],
+                 "branch_base": "base", "branch_lineage": ["fork"]}
+        with self.assertRaises(ic.ImportError_):
+            ic._validate_imported_state({"chatgpt:attacker-chosen-cid": entry})
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"; out.mkdir()
+            ic.imported_path(out).write_text(json.dumps({"chatgpt:attacker-chosen-cid": entry}), encoding="utf-8")
+            with self.assertRaises(ic.ImportError_):
+                ic.load_imported(out)
+            self.assertFalse(list(out.glob("*.md")))
+
+    def test_codex_invalid_declared_session_id_fails_closed(self) -> None:
+        for invalid in (True, [], {}, " ", float("nan"), float("inf")):
+            with self.subTest(invalid=type(invalid).__name__), tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "rollout-fallback.jsonl"
+                path.write_text(json.dumps({"type": "session_meta", "payload": {"id": invalid}}), encoding="utf-8")
+                with self.assertRaisesRegex(ic.ImportError_, "Codex session ID 无效") as raised:
+                    ic._codex_session_id(path)
+                self.assertNotIn("nan", str(raised.exception).lower())
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout-fallback.jsonl"
+            path.write_text(json.dumps({"type": "session_meta", "payload": {}}), encoding="utf-8")
+            self.assertEqual(ic._codex_session_id(path), "fallback")
+
     def test_gemini_chrome_position_preserves_non_allowlisted_body_text(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "我的活动记录.html"
@@ -2390,7 +2414,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "private.md"
             with unittest.mock.patch("os.replace", side_effect=OSError("replace failed")):
-                with self.assertRaisesRegex(OSError, "replace failed"):
+                with self.assertRaisesRegex(ic.ImportError_, "无法安全替换输出文件"):
                     ic._atomic_write(path, "inside")
             self.assertEqual(list(Path(td).glob(".private.md.*.tmp")), [])
 
@@ -2401,14 +2425,48 @@ class CliTests(unittest.TestCase):
             outside.write_text("outside", encoding="utf-8")
             os.chmod(outside, 0o644)
             real_replace = os.replace
-            def replace_then_swap(src, dst):
-                real_replace(src, dst)
-                Path(dst).unlink()
-                Path(dst).symlink_to(outside)
+            def replace_then_swap(src, dst, **kwargs):
+                real_replace(src, dst, **kwargs)
+                path.unlink()
+                path.symlink_to(outside)
             with unittest.mock.patch("os.replace", side_effect=replace_then_swap):
                 ic._atomic_write(path, "inside")
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
             self.assertEqual(os.stat(outside).st_mode & 0o777, 0o644)
+
+    def test_atomic_write_holds_parent_fd_when_path_is_swapped_before_temp_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out, outside = root / "out", root / "outside"
+            out.mkdir(); outside.mkdir()
+            sentinel = outside / "sentinel"
+            sentinel.write_text("outside", encoding="utf-8")
+            os.chmod(outside, 0o755); os.chmod(sentinel, 0o644)
+            relocated = root / "relocated"
+            real_chmod = ic._chmod_safe_directory
+            def chmod_then_swap(path, mode):
+                real_chmod(path, mode)
+                out.rename(relocated)
+                out.symlink_to(outside, target_is_directory=True)
+            conv = ("chatgpt", "safe", "title", "2026-08-01", [("user", None, "m", "body")])
+            with unittest.mock.patch.object(ic, "_chmod_safe_directory", side_effect=chmod_then_swap):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(conv, {}, out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+            self.assertEqual(os.stat(outside).st_mode & 0o777, 0o755)
+            self.assertFalse((outside / "chatgpt-safe.md").exists())
+
+    def test_main_redacts_unexpected_oserror_details(self) -> None:
+        stderr = io.StringIO()
+        with unittest.mock.patch.object(ic, "load_imported", side_effect=OSError("secret-path/private-detail")), \
+                unittest.mock.patch.object(sys, "argv", ["import_chats.py", "--source", "chatgpt", "--path", "x"]), \
+                redirect_stderr(stderr):
+            self.assertEqual(ic.main(), 1)
+        message = stderr.getvalue()
+        self.assertIn("本地文件操作失败；请检查权限和输出目录后重试", message)
+        self.assertNotIn("secret-path", message)
+        self.assertNotIn("private-detail", message)
 
     def test_write_rejects_post_collision_target_and_directory_symlink_swaps(self) -> None:
         with tempfile.TemporaryDirectory() as td:
