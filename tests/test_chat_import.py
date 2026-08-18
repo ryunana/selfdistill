@@ -1668,6 +1668,32 @@ class ParserTests(unittest.TestCase):
                 self.assertEqual(conv[1], "same")
                 self.assertEqual(ic._branch_metadata(source, conv[1], conv[4]), ("same", ()))
 
+    def test_parse_a_then_parse_b_keeps_a_branch_evidence_for_later_import(self) -> None:
+        for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
+                                         ("deepseek", "conversations.json", ic.parse_deepseek)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                root, out, imported = Path(td), Path(td) / "out", {}
+                def node(role, text, parent, children):
+                    if source == "chatgpt":
+                        return {"parent": parent, "children": children, "message": {
+                            "id": text, "author": {"role": role}, "content": {"parts": [text]}}}
+                    return {"parent": parent, "children": children, "message": {
+                        "fragments": [{"type": "REQUEST" if role == "user" else "RESPONSE", "content": text}]}}
+                first, second = root / filename, root / ("other-" + filename)
+                first.write_text(json.dumps([{"id": "same", "mapping": {
+                    "r": {"parent": None, "children": ["u"]}, "u": node("user", "q", "r", ["a", "b"]),
+                    "a": node("assistant", "a", "u", []), "b": node("assistant", "b", "u", []),
+                }}]), encoding="utf-8")
+                parsed_a, _skipped, total = parser(first)
+                second.write_text(json.dumps([{"id": "same", "mapping": {
+                    "r": {"parent": None, "children": ["u"]}, "u": node("user", "other", "r", ["z"]),
+                    "z": node("assistant", "z", "u", []),
+                }}]), encoding="utf-8")
+                parser(second)
+                result = ic.import_convs(parsed_a, [], total, imported, out, False)
+                self.assertEqual(result[2], 2)
+                self.assertEqual(sum("branch_lineage" in entry for entry in imported.values()), 2)
+
     def test_branch_state_continues_through_invisible_smaller_and_nested_forks(self) -> None:
         for source, filename, parser in (("chatgpt", "conversations-000.json", ic.parse_chatgpt),
                                          ("deepseek", "conversations.json", ic.parse_deepseek)):
@@ -1787,7 +1813,26 @@ class ParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "rollout-fallback.jsonl"
             path.write_text(json.dumps({"type": "session_meta", "payload": {}}), encoding="utf-8")
-            self.assertEqual(ic._codex_session_id(path), "fallback")
+            self.assertIsNone(ic._codex_session_id(path))
+
+    def test_codex_missing_session_id_uses_visible_content_identity_not_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            one, renamed = root / "rollout-one.jsonl", root / "renamed.jsonl"
+            rows = [
+                {"type": "session_meta", "payload": {}},
+                {"type": "response_item", "timestamp": "2026-08-01T10:00:00Z", "payload": {
+                    "type": "message", "role": "user", "id": "native-first",
+                    "content": [{"type": "input_text", "text": "visible"}]}},
+            ]
+            payload = "\n".join(json.dumps(row) for row in rows)
+            one.write_text(payload, encoding="utf-8"); renamed.write_text(payload, encoding="utf-8")
+            first, same = ic.parse_codex(one)[0], ic.parse_codex(renamed)[0]
+            self.assertEqual(first[1], same[1])
+            rows.append({"type": "response_item", "timestamp": "2026-08-01T10:01:00Z", "payload": {
+                "type": "message", "role": "assistant", "id": "later", "content": [{"type": "output_text", "text": "later"}]}})
+            renamed.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            self.assertEqual(ic.parse_codex(renamed)[0][1], first[1])
 
     def test_gemini_chrome_position_preserves_non_allowlisted_body_text(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1797,6 +1842,16 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(skipped, [])
             self.assertIn("private prompt header", convs[0][4][0][3])
             self.assertIn("private answer caption", convs[0][4][1][3])
+
+    def test_gemini_information_caption_must_be_allowlisted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "我的活动记录.html"
+            chrome = "".join(f"<div class='header-cell'>{line}</div>" for line in (
+                "Gemini Apps", "商品：", "详细信息：", "为什么此处会显示此活动记录？", "控制这些设置"))
+            p.write_text(f"""<div class='outer-cell'><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>Prompted：q</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:05</div><p>a</p></div><div class='outer-cell'>{chrome}<div class='mdl-typography--caption'>unallowlisted caption</div><div class='content-cell mdl-cell--6-col mdl-typography--body-1'>2026年8月3日 下午4:06</div></div>""", encoding="utf-8")
+            convs, skipped, _ = ic.parse_gemini(p)
+            self.assertEqual(len(convs), 1)
+            self.assertEqual([reason for _ref, reason in skipped], ["Gemini 未绑定活动容器"])
 
     def test_claude_missing_session_id_and_ambiguous_records_preserve_visible_text(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2038,7 +2093,7 @@ class CliTests(unittest.TestCase):
               unittest.mock.patch.object(ic, "_build_path_owner_index",
                                          wraps=ic._build_path_owner_index) as build_index):
             total, outputs, new, updated, dup, skipped = ic.import_convs(
-                conversations, [], len(conversations), imported, out, dry_run=False)
+                conversations, [], len(conversations), imported, out, dry_run=True)
         self.assertEqual((total, outputs, new, updated, dup, skipped),
                          (prior_count, prior_count, prior_count, 0, 0, []))
         self.assertEqual(build_index.call_count, 1)
@@ -2212,7 +2267,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ic.write_conversation(conv, {}, managed), "new")
             managed_state = ic.imported_path(managed)
             managed_state.write_text("{}", encoding="utf-8")
-            self.assertEqual(ic.load_imported(managed), {})
+            self.assertIn("chatgpt:owned", ic.load_imported(managed))
             self.assertEqual(ic.write_conversation(conv, {}, managed), "dup")
 
             managed_state.unlink()
@@ -2457,6 +2512,26 @@ class CliTests(unittest.TestCase):
             self.assertEqual(os.stat(outside).st_mode & 0o777, 0o755)
             self.assertFalse((outside / "chatgpt-safe.md").exists())
 
+    def test_safe_directory_fd_rejects_intermediate_ancestor_symlink_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            trusted, outside = root / "trusted", root / "outside"
+            trusted.mkdir(); outside.mkdir()
+            middle, held = trusted / "middle", trusted / "held"
+            middle.mkdir()
+            sentinel = outside / "sentinel"; sentinel.write_text("outside", encoding="utf-8")
+            real_open = os.open
+            def swap_before_open(name, flags, *args, **kwargs):
+                if name == "middle" and kwargs.get("dir_fd") is not None and middle.exists():
+                    middle.rename(held)
+                    middle.symlink_to(outside, target_is_directory=True)
+                return real_open(name, flags, *args, **kwargs)
+            with unittest.mock.patch("os.open", side_effect=swap_before_open):
+                with self.assertRaises(ic.ImportError_):
+                    ic._safe_directory_fd(middle / "leaf")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertFalse((outside / "leaf").exists())
+
     def test_main_redacts_unexpected_oserror_details(self) -> None:
         stderr = io.StringIO()
         with unittest.mock.patch.object(ic, "load_imported", side_effect=OSError("secret-path/private-detail")), \
@@ -2636,6 +2711,31 @@ class CliTests(unittest.TestCase):
         self.assertIn("重复 1", rerun.stdout)
         restored = ic.load_imported(out)
         self.assertIn("chatgpt:chatgpt-conv-001", restored)
+
+    def test_load_recovers_managed_markdown_added_after_prior_state_write(self) -> None:
+        out = self._tmp()
+        first = ("chatgpt", "first", "first", "2026-08-01", [("user", None, "m1", "one")])
+        second = ("chatgpt", "second", "second", "2026-08-01", [("user", None, "m2", "two")])
+        state = {}
+        self.assertEqual(ic.write_conversation(first, state, out), "new")
+        ic.save_imported(state, out)
+        # Simulate a crash after the second Markdown replacement but before its
+        # state replacement.
+        self.assertEqual(ic.write_conversation(second, {}, out), "new")
+        recovered = ic.load_imported(out)
+        self.assertEqual(set(recovered), {"chatgpt:first", "chatgpt:second"})
+        ic.save_imported(recovered, out)
+        self.assertEqual(set(ic.load_imported(out)), set(recovered))
+
+    def test_recovery_decodes_canonical_escaped_metadata_and_anchors_message_ids(self) -> None:
+        out = self._tmp()
+        cid = "safe<&\\newline\n"
+        conv = ("chatgpt", cid, "title", "2026-08-01", [("user", None, "m<&\\n", "body\nmessage_id: forged）：")])
+        self.assertEqual(ic.write_conversation(conv, {}, out), "new")
+        ic.imported_path(out).write_text("{}", encoding="utf-8")
+        recovered = ic.load_imported(out)
+        self.assertIn(f"chatgpt:{cid}", recovered)
+        self.assertEqual(recovered[f"chatgpt:{cid}"]["message_ids"], ["m<&\\n"])
 
     def test_dedup_no_new_messages(self) -> None:
         out = self._tmp()

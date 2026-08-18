@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import html
 import json
 import math
 import os
@@ -155,19 +156,9 @@ def _make_conversation(source: str, cid: str, title: str, msgs: list) -> tuple:
     return (source, cid, title, exported_at, msgs)
 
 
-_BRANCH_LINEAGES: dict[tuple[str, str], tuple[str, tuple[str, ...]]] = {}
-_BRANCH_LINEAGES_BY_MESSAGES: dict[tuple[str, tuple[str, ...]], tuple[str, tuple[str, ...]]] = {}
-_BRANCH_LINEAGES_BY_CID_MESSAGES: dict[tuple[str, str, tuple[str, ...]], tuple[str, tuple[str, ...]]] = {}
-
-
-def _clear_branch_lineages(source: str) -> None:
-    """Keep parser-local lineage hints from crossing independent exports."""
-    for key in [key for key in _BRANCH_LINEAGES if key[0] == source]:
-        del _BRANCH_LINEAGES[key]
-    for key in [key for key in _BRANCH_LINEAGES_BY_MESSAGES if key[0] == source]:
-        del _BRANCH_LINEAGES_BY_MESSAGES[key]
-    for key in [key for key in _BRANCH_LINEAGES_BY_CID_MESSAGES if key[0] == source]:
-        del _BRANCH_LINEAGES_BY_CID_MESSAGES[key]
+class _BranchMessages(list):
+    """A normal message list with parser-local branch evidence attached."""
+    branch_metadata: Optional[tuple[str, tuple[str, ...]]] = None
 
 
 def _sanitize_filename(name: str) -> str:
@@ -194,7 +185,8 @@ def _stable_branch_cids(base: str, outputs: list[tuple[list[str], list]],
             siblings = children.get(path[index - 1], ())
             if len(siblings) > 1 and nid != min(siblings):
                 alternatives.append(nid)
-        cids.append(base if not alternatives else f"{base}--branch-{_path_fingerprint(alternatives)}")
+        lineage = _branch_lineage(path, children)
+        cids.append(base if not alternatives else _lineage_cid(base, lineage))
     return cids
 
 
@@ -203,20 +195,16 @@ def _branch_lineage(path: list[str], children: dict[str, list[str]]) -> tuple[st
                  if len(children.get(path[index - 1], ())) > 1)
 
 
-def _register_branch_lineage(source: str, cid: str, base: str, path: list[str], children: dict[str, list[str]],
-                             msgs: list) -> None:
-    metadata = (base, _branch_lineage(path, children))
-    message_ids = tuple(message[2] for message in msgs)
-    _BRANCH_LINEAGES[(source, cid)] = metadata
-    _BRANCH_LINEAGES_BY_MESSAGES[(source, message_ids)] = metadata
-    _BRANCH_LINEAGES_BY_CID_MESSAGES[(source, cid, message_ids)] = metadata
+def _bind_branch_lineage(base: str, path: list[str], children: dict[str, list[str]], msgs: list) -> _BranchMessages:
+    bound = _BranchMessages(msgs)
+    bound.branch_metadata = (base, _branch_lineage(path, children))
+    return bound
 
 
 def _branch_metadata(source: str, cid: str, msgs: list) -> Optional[tuple[str, tuple[str, ...]]]:
-    message_ids = tuple(message[2] for message in msgs)
-    return (_BRANCH_LINEAGES_BY_CID_MESSAGES.get((source, cid, message_ids))
-            or _BRANCH_LINEAGES.get((source, cid))
-            or _BRANCH_LINEAGES_BY_MESSAGES.get((source, message_ids)))
+    # `msgs` is deliberately the carrier: parsing export A then export B must
+    # not alter A's later import identity.
+    return getattr(msgs, "branch_metadata", None)
 
 
 def _graph_reference(value, *, allow_null: bool = False) -> Optional[str]:
@@ -358,7 +346,6 @@ def _chatgpt_parts(parts) -> tuple[str, int]:
 
 def parse_chatgpt(path: Path) -> tuple:
     """Use current_node, otherwise preserve each complete branch rather than flattening."""
-    _clear_branch_lineages("chatgpt")
     files = sorted(path.glob("conversations-*.json")) if path.is_dir() else [path]
     if not files:
         raise ImportError_("未找到 ChatGPT 会话导出；请确认导出目录后重试")
@@ -489,8 +476,8 @@ def parse_chatgpt(path: Path) -> tuple:
                 title = _safe_title(conv.get("title"))
                 if branching and cid != base:
                     title += "（分支）"
+                msgs = _bind_branch_lineage(base, node_path, children, msgs)
                 convs.append(_make_conversation("chatgpt", cid, title, msgs))
-                _register_branch_lineage("chatgpt", cid, base, node_path, children, msgs)
             if unknown_parts_by_node:
                 skipped.append(("—", f"未识别 ChatGPT 附件 {sum(unknown_parts_by_node.values())} 个"))
             if reasoning_nodes:
@@ -636,12 +623,9 @@ def _is_known_gemini_information_container(lines: list[str], structural_time_ind
     """Recognize only the fixed, chrome-only Takeout information rows."""
     if not chrome_indexes:
         return False
-    # Direct provider/time-field placement is not itself proof that arbitrary
-    # text is chrome. Every non-chrome field must independently be safe
-    # metadata; otherwise retain a static failure for review.
-    non_chrome = [line for i, line in enumerate(lines) if i not in chrome_indexes]
-    if not non_chrome or not all(_gemini_safe_metadata_line(line)
-                                 for line in non_chrome):
+    # DOM placement is never enough: every caption/header field must itself
+    # be a fixed Takeout label, provider URL, or exact time field.
+    if not lines or not all(_gemini_safe_metadata_line(line) for line in lines):
         return False
     return sum(1 for i in chrome_indexes if _GEMINI_DROP_LINES.fullmatch(lines[i])) >= 5
 
@@ -754,7 +738,6 @@ def parse_gemini(path: Path) -> tuple:
 
 def parse_deepseek(path: Path) -> tuple:
     """conversations.json（或 zip）：mapping 树 + fragments（REQUEST/RESPONSE/THINK/FILE）。"""
-    _clear_branch_lineages("deepseek")
     data = None
     if path.is_dir():
         files = sorted(path.rglob("conversations.json"))
@@ -916,8 +899,8 @@ def parse_deepseek(path: Path) -> tuple:
             title = _safe_title(conv.get("title"))
             if branching and cid != base:
                 title += "（分支）"
+            msgs = _bind_branch_lineage(base, node_path, children, msgs)
             convs.append(_make_conversation("deepseek", cid, title, msgs))
-            _register_branch_lineage("deepseek", cid, base, node_path, children, msgs)
     if tool_count:
         skipped.append(("—", f"工具片段 {tool_count} 条（SEARCH/TOOL_SEARCH/TOOL_OPEN）已识别，不纳入蒸馏正文"))
     return convs, skipped, total
@@ -1081,7 +1064,7 @@ def _codex_text_with_events(content, events: Optional[list[str]]) -> str:
     return "\n".join(parts).strip()
 
 
-def _codex_session_id(path: Path) -> str:
+def _codex_session_id(path: Path) -> Optional[str]:
     try:
         with path.open(encoding="utf-8") as fh:
             for line in fh:
@@ -1104,7 +1087,14 @@ def _codex_session_id(path: Path) -> str:
                 break
     except (OSError, UnicodeDecodeError):
         pass
-    return path.stem.removeprefix("rollout-") or path.stem
+    return None
+
+
+def _codex_content_session_id(msgs: list) -> str:
+    """A rename- and append-stable fallback when the provider omitted session ID."""
+    role, _time, mid, text = msgs[0]
+    return "fp-session-" + hashlib.sha1(
+        f"{role}|{mid}|{_normalize_message_text(text)}".encode("utf-8")).hexdigest()[:16]
 
 
 _CODEX_KNOWN_TOP_LEVEL_TYPES = {
@@ -1224,6 +1214,8 @@ def parse_codex(path: Path, events: Optional[list[str]] = None) -> Optional[list
         raise ImportError_("Codex JSONL UTF-8 解码失败")
     if not msgs:
         return None
+    if cid is None:
+        cid = _codex_content_session_id(msgs)
     title = _first_user_snippet(msgs) or path.stem
     return [_make_conversation("codex", cid, title, msgs)]
 
@@ -1503,12 +1495,31 @@ def _chmod_safe_regular(path: Path, mode: int) -> None:
 
 
 def _safe_directory_fd(path: Path) -> int:
+    """Walk from / with dir-fd no-follow opens; never trust an ancestor path."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = os.open("/", flags)
     except OSError:
         raise ImportError_("输出目录已变化，拒绝访问")
     try:
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        components = list(absolute.parts[1:])
+        # macOS exposes /var as the fixed system alias /private/var.  Expand
+        # only that exact root alias before the no-follow walk; do not resolve
+        # arbitrary user-controlled ancestors.
+        if components and components[0] == "var":
+            try:
+                if os.readlink("/var") == "private/var":
+                    components[:1] = ["private", "var"]
+            except OSError:
+                pass
+        for component in components:
+            try:
+                child_fd = os.open(component, flags, dir_fd=fd)
+            except OSError:
+                raise ImportError_("输出目录已变化，拒绝访问")
+            os.close(fd)
+            fd = child_fd
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             raise ImportError_("输出目录已变化，拒绝访问")
         return fd
@@ -1541,7 +1552,7 @@ def _assert_single_link_regular(path: Path, reason: str) -> None:
         raise ImportError_(reason)
 
 
-def _validate_imported_state(data) -> dict:
+def _validate_imported_state(data, out_dir: Optional[Path] = None) -> dict:
     if not isinstance(data, dict):
         raise ImportError_("状态文件结构损坏，未修改（期望 JSON 对象）")
     for key, entry in data.items():
@@ -1561,6 +1572,10 @@ def _validate_imported_state(data) -> dict:
                 or any(not isinstance(mid, str) or not mid for mid in message_ids)
                 or len(message_ids) != len(set(message_ids))):
             raise ImportError_("状态文件结构损坏，未修改（会话字段无效）")
+        if out_dir is not None:
+            expected = out_dir / f"{state_source}-{_sanitize_filename(state_cid)}.md"
+            if not _same_path(path, expected):
+                raise ImportError_("状态文件结构损坏，未修改（会话路径无效）")
         has_base = "branch_base" in entry
         has_lineage = "branch_lineage" in entry
         if has_base != has_lineage:
@@ -1573,7 +1588,7 @@ def _validate_imported_state(data) -> dict:
                     or any(not isinstance(item, str) or not item.strip() for item in lineage)
                     or len(lineage) != len(set(lineage))):
                 raise ImportError_("状态文件结构损坏，未修改（分支字段无效）")
-            if state_cid != base and not state_cid.startswith(base + "--branch-"):
+            if state_cid != base and state_cid != _lineage_cid(base, tuple(lineage)):
                 raise ImportError_("状态文件结构损坏，未修改（分支会话键无效）")
     return data
 
@@ -1581,7 +1596,7 @@ def _validate_imported_state(data) -> dict:
 def _is_valid_imported_state(path: Path) -> bool:
     try:
         _assert_single_link_regular(path, "状态文件不是安全普通文件，拒绝访问")
-        _validate_imported_state(json.loads(_read_safe_text(path)))
+        _validate_imported_state(json.loads(_read_safe_text(path)), path.parent)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ImportError_):
         return False
     return True
@@ -1712,7 +1727,9 @@ def load_imported(out_dir: Path) -> dict:
             data = json.loads(_read_safe_text(p))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ImportError_):
             raise ImportError_("状态文件损坏或 UTF-8 解码失败，未修改")
-        return _validate_imported_state(data)
+        data = _validate_imported_state(data, out_dir)
+        _validate_state_output_binding(data, out_dir)
+        return data
     return {}
 
 
@@ -1720,6 +1737,8 @@ def save_imported(imported: dict, out_dir: Path) -> None:
     _assert_safe_output_root(out_dir)
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     _chmod_safe_directory(out_dir, 0o700)
+    _validate_imported_state(imported, out_dir)
+    _validate_state_output_binding(imported, out_dir)
     _atomic_write(imported_path(out_dir), json.dumps(imported, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -1751,6 +1770,23 @@ def _markdown_metadata(value) -> str:
     text = str(value).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
     return (text.replace("&", "&amp;").replace("<", "&lt;")
                 .replace(">", "&gt;"))
+
+
+def _unmarkdown_metadata(value: str) -> Optional[str]:
+    """Invert only the canonical metadata encoding used by this writer."""
+    text = html.unescape(value)
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "\\":
+            out.append(text[index]); index += 1; continue
+        if index + 1 >= len(text) or text[index + 1] not in ("\\", "n", "r"):
+            return None
+        marker = text[index + 1]
+        out.append({"\\": "\\", "n": "\n", "r": "\r"}[marker])
+        index += 2
+    decoded = "".join(out)
+    return decoded if _markdown_metadata(decoded) == value else None
 
 
 def _managed_parts(content: str, path: Path) -> tuple[str, str, str]:
@@ -1814,6 +1850,45 @@ def _claim_path_owner(path_owners: dict[str, str], key: str, path: Path) -> None
 
 def _conversation_output_path(conv: tuple, out_dir: Path) -> Path:
     return out_dir / f"{conv[0]}-{_sanitize_filename(conv[1])}.md"
+
+
+def _validate_state_output_binding(imported: dict, out_dir: Path) -> None:
+    """Validate state entries, then safely recover a state-write interruption."""
+    state_paths: set[str] = set()
+    for key, entry in imported.items():
+        source, cid = key.split(":", 1)
+        path = _conversation_output_path((source, cid, "", "", []), out_dir)
+        if not path.exists():
+            raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+        _assert_single_link_regular(path, "状态文件与 Markdown 输出不一致，未修改")
+        ownership = _header_ownership_metadata(_read_safe_text(path))
+        if ownership != (_markdown_metadata(source), _markdown_metadata(cid)):
+            raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+        state_paths.add(_normalized_path(path))
+    for path in (entry for entry in out_dir.iterdir() if entry.suffix == ".md"):
+        if _normalized_path(path) in state_paths:
+            continue
+        content = _read_safe_text(path)
+        ownership = _header_ownership_metadata(content)
+        if ownership is None:
+            raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+        source = _unmarkdown_metadata(ownership[0])
+        cid = _unmarkdown_metadata(ownership[1])
+        if (source is None or cid is None
+                or not _same_path(path, _conversation_output_path((source, cid, "", "", []), out_dir))):
+            raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+        key = f"{source}:{cid}"
+        if key in imported:
+            raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+        _before, body, _after = _managed_parts(content, path)
+        rendered_ids = re.findall(r"(?m)^\*\*(?:user|assistant)\*\*（[^\n]*?；message_id: (.*?)）：$", body)
+        message_ids = [_unmarkdown_metadata(mid) for mid in rendered_ids]
+        if any(mid is None for mid in message_ids) or len(message_ids) != len(set(message_ids)):
+            raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+        imported[key] = {
+            "path": str(path), "imported_at": today_str(), "title": "恢复的会话",
+            "message_ids": message_ids,
+        }
 
 
 def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
@@ -2010,7 +2085,9 @@ def discover_local(since: Optional[str] = None, excludes: tuple = (), roots: tup
 
 def _session_id(source: str, path: Path) -> str:
     if source == "codex":
-        return _codex_session_id(path)
+        # Discovery IDs are never rendered or written; parser-derived content
+        # identity below remains authoritative for missing provider IDs.
+        return _codex_session_id(path) or "pending-content-session"
     return path.stem
 
 
