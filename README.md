@@ -49,38 +49,28 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude
 
 ## 快速开始
 
-你不需要先学会 Python。整个流程可以理解成：**你负责导出和确认，AI 负责整理、提出候选和生成建议；所有正式写入仍由你确认。**
+你只需要做两件事：**① 导出聊天记录 → ② 把项目链接和导出位置一句话发给你的 AI 助手**。之后的整理、提炼、生成候选、构建、写回全部由 AI 助手完成，你只在最后逐条确认结果。
 
-### 环境要求
+### 你要做的
 
-- Python 3.9+（纯标准库，无第三方依赖）；
-- 本仓库（clone 或下载后解压）。
-
-### 使用者要做的
-
-1. 按 [导入来源](#导入来源) 在对应 AI 工具里导出聊天记录；原始导出放在仓库外的本机目录（不要放进 `input/`），运行 `python3 import_chats.py --source <来源> --path <原始导出路径>`，由导入器把统一 Markdown 写入 `input/`。
-2. 把这个仓库交给你正在使用的 AI（例如 Codex、Claude Code、Hermes 或 DeepSeek Harness），然后直接告诉它：
+1. 按 [导入来源](#导入来源) 在对应 AI 工具里导出聊天记录，记下导出文件在本机的存放位置。
+2. 把项目链接发给你正在使用的 AI（Codex、Claude Code、Hermes 或 DeepSeek Harness 等），一句话说明：
 
    ```text
-   请接手这个 selfdistill 项目：
-   1. 按 docs/intake.md 整理我提供的聊天记录：原始导出留在仓库外本机目录，不要提交到 Git；只把统一 Markdown 放进 input/；
-   2. 按 prompts/distill.md 从头读完材料，先报告阅读边界，再提出 L1–L4 候选；
-   3. L3 和个人/敏感/高风险/冲突内容逐条给我确认；只有可见、可撤回的低风险通用规则可免逐条确认；
-   4. 不要直接写 canonical/、L4 或简历。等我处理候选后，先展示完整 aggregate diff，再等我明确确认才写入；
-   5. 写入后再运行 python3 build.py；如果要写回 Codex、Hermes 或 DeepSeek Harness（DSH），先展示 diff，得到我明确确认后再执行 install.py。
+   按这个项目蒸馏我：https://github.com/ryunana/selfdistill
+   我的聊天记录导出在：<这里填导出文件在本机的路径>
    ```
 
-3. 查看 AI 给出的候选，逐条确认、修改或拒绝。需要写回 AI 工具时，再确认一次 diff。
+   AI 助手会自己 clone 项目、读取接手指令（`AGENTS.md`）、导入记录、提出 L1–L4 候选。
+3. 查看 AI 给出的候选，逐条确认、修改或拒绝；写回 AI 工具前再确认一次 diff。
 
-> 使用 DeepSeek Harness 的用户可以[安装 selfdistill 插件](#安装-selfdistill-插件可选)，让 DSH 的 agent 直接掌握这套工作流，无需每次粘贴上面的 prompt。
+> 使用 DeepSeek Harness 的用户可以[安装 selfdistill 插件](#安装-selfdistill-插件可选)，让 DSH 的 agent 直接掌握这套工作流，无需每次发送上面的链接说明。
 
-### AI 要做的
+### AI 助手会做什么（自动，无需你操心）
 
-1. 阅读 `docs/intake.md`；原始导出保留在仓库外本机目录，通过 `import_chats.py --path <原始导出路径>` 整理成统一 Markdown 写入已被 Git 忽略的 `input/`。
-2. 按 `prompts/distill.md` 提炼 L1–L4 候选；先展示来源和候选，不直接改正式档案。
-3. 只在用户已处理候选、并明确确认了最终 aggregate diff 后，才增量写入 `canonical/`（结构参考 `templates/`，仓库里的「张三」是虚构样例）。
-4. 运行 `python3 build.py`，生成 `dist/index.html`、L1–L4 报告以及 `dist/codex/`、`dist/hermes/`、`dist/dsh/`。
-5. 如使用者要写回，运行 `python3 install.py --target codex`（或 `hermes` / `dsh`）：先展示 diff，等使用者明确确认后再增量写入，不覆盖无关内容。
+AI 助手 clone 项目后会自动读取根目录的 `AGENTS.md` 接手指令，按「导入 → 提炼候选 → 逐条确认 → 写 canonical/ → 构建 → 写回」执行。完整流程见 `AGENTS.md` 和 `prompts/distill.md`。
+
+手动完成每个步骤的说明（不依赖 AI 助手）见下方各节。
 
 ## 首次蒸馏：从完整历史建立 L1–L4
 
