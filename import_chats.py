@@ -71,7 +71,9 @@ def fmt_time(value) -> Optional[str]:
     """归一化为本地时区 'YYYY-MM-DD HH:MM'；无法解析返回 None。"""
     if value is None:
         return None
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # bool is an int subclass; malformed exports with create_time: true
+        # must not render as 1970-01-01.
         try:
             return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M")
         except (OSError, ValueError, OverflowError):
@@ -1629,6 +1631,8 @@ def _validate_imported_state(data, out_dir: Optional[Path] = None) -> dict:
                     or any(not isinstance(item, str) or not item.strip() for item in lineage)
                     or len(lineage) != len(set(lineage))):
                 raise ImportError_("状态文件结构损坏，未修改（分支字段无效）")
+            # Only branch keys are lineage-bound; a base key's branch_lineage
+            # is corroborating information, not identity.
             if state_cid != base and state_cid != _lineage_cid(base, tuple(lineage)):
                 raise ImportError_("状态文件结构损坏，未修改（分支会话键无效）")
     return data
@@ -2017,7 +2021,13 @@ def _continue_branch_identities(convs: list, imported: dict, *,
             if isinstance(old_ids, list) and old_ids and set(old_ids).issubset(message_ids):
                 matches.append((old_cid, entry))
         if len(matches) > 1:
-            same_lineage = [match for match in matches if match[1].get("branch_lineage") == list(lineage)]
+            same_lineage = [match for match in matches
+                            if match[1].get("branch_lineage") == list(lineage)]
+            if len(same_lineage) > 1:
+                # A base key is not lineage-bound (its branch_lineage is
+                # corroborating, not identity): when a bound branch key also
+                # matches the lineage, the hash-authenticated identity wins.
+                same_lineage = [match for match in same_lineage if match[0] != base]
             matches = same_lineage if len(same_lineage) == 1 else []
         if len(matches) == 1 and f"{source}:{matches[0][0]}" not in used:
             old_cid = matches[0][0]
@@ -2456,6 +2466,8 @@ def main() -> int:
     global _INCLUDE_THINKING
     _INCLUDE_THINKING = args.include_thinking
 
+    if args.root == "":
+        ap.error("--root 不能为空字符串")
     out_dir = Path(args.root).expanduser() if args.root else INPUT_DIR
     try:
         # Even dry-run consults the Markdown truth and must not hide a corrupt state file.

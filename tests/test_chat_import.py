@@ -1884,6 +1884,12 @@ class FmtTimeTests(unittest.TestCase):
         self.assertIsNone(ic.fmt_time("not a date"))
         self.assertIsNone(ic.fmt_time(None))
 
+    def test_bool_timestamp_is_rejected_not_epoch(self) -> None:
+        # bool is an int subclass; malformed exports with create_time: true
+        # must not render as 1970-01-01.
+        self.assertIsNone(ic.fmt_time(True))
+        self.assertIsNone(ic.fmt_time(False))
+
 
 class CliTests(unittest.TestCase):
     def _tmp(self) -> Path:
@@ -2354,6 +2360,16 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("private-name", stream.getvalue())
             self.assertNotIn("private stat detail", stream.getvalue())
 
+    def test_empty_root_is_rejected_not_silently_defaulted(self) -> None:
+        stream = io.StringIO()
+        argv = ["import_chats.py", "--source", "local", "--root", ""]
+        with (unittest.mock.patch.object(sys, "argv", argv),
+              redirect_stderr(stream)):
+            with self.assertRaises(SystemExit) as raised:
+                ic.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--root 不能为空字符串", stream.getvalue())
+
     def test_zip_read_runtime_error_becomes_import_error(self) -> None:
         fake = unittest.mock.MagicMock()
         fake.__enter__.return_value = fake
@@ -2810,6 +2826,48 @@ class CliTests(unittest.TestCase):
         # The repaired in-memory state is what a later state write persists.
         ic.save_imported(recovered, out)
         self.assertEqual(ic.load_imported(out)[f"chatgpt:{old_cid}"]["message_ids"], ["real-id"])
+
+    def test_forged_lineage_on_base_key_cannot_steal_branch_continuation(self) -> None:
+        base, lineage = "truth", ("new-branch",)
+        bound_cid = ic._lineage_cid(base, lineage)
+        state = {
+            # The base key's lineage is unbound corroboration (forgivable);
+            # the bound branch key is the hash-authenticated identity for
+            # this lineage and must win the disambiguation.
+            f"chatgpt:{base}": {"path": "truth.md", "imported_at": "2026-08-01", "title": "x",
+                                "message_ids": ["shared-id"], "branch_base": base,
+                                "branch_lineage": list(lineage)},
+            f"chatgpt:{bound_cid}": {"path": "new.md", "imported_at": "2026-08-01", "title": "x",
+                                     "message_ids": ["shared-id"], "branch_base": base,
+                                     "branch_lineage": list(lineage)},
+        }
+        msgs = ic._bind_branch_lineage(base, ["root", "new-branch"],
+                                       {"root": ["old-branch", "new-branch"]},
+                                       [("user", None, "shared-id", "body")])
+        continued = ic._continue_branch_identities(
+            [("chatgpt", ic._lineage_cid(base, ("provisional",)), "title", "2026-08-01", msgs)], state)
+        self.assertEqual(continued[0][1], bound_cid)
+
+    def test_base_entry_lineage_remains_continuation_target_as_sole_match(self) -> None:
+        base, lineage = "truth", ("new-branch",)
+        state = {
+            # The base key legitimately carries this lineage from a previous
+            # continuation; no bound branch key matches it, so it must still
+            # win the disambiguation (otherwise the branch would duplicate).
+            f"chatgpt:{base}": {"path": "truth.md", "imported_at": "2026-08-01", "title": "x",
+                                "message_ids": ["shared-id"], "branch_base": base,
+                                "branch_lineage": list(lineage)},
+            f"chatgpt:{ic._lineage_cid(base, ('old-branch',))}": {
+                "path": "old.md", "imported_at": "2026-08-01", "title": "x",
+                "message_ids": ["shared-id"], "branch_base": base,
+                "branch_lineage": ["old-branch"]},
+        }
+        msgs = ic._bind_branch_lineage(base, ["root", "new-branch"],
+                                       {"root": ["old-branch", "new-branch"]},
+                                       [("user", None, "shared-id", "body")])
+        continued = ic._continue_branch_identities(
+            [("chatgpt", ic._lineage_cid(base, ("provisional",)), "title", "2026-08-01", msgs)], state)
+        self.assertEqual(continued[0][1], base)
 
     def test_recovery_ignores_forged_complete_message_heading_in_body(self) -> None:
         out = self._tmp()
