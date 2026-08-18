@@ -49,38 +49,28 @@ Export chat history → Normalize into unified Markdown → AI distills L1–L4 
 
 ## Quick Start
 
-You don't need to learn Python first. Think of it as: **you export and confirm; the AI organizes, proposes candidates, and generates suggestions — all formal writes still go through you.**
-
-### Requirements
-
-- Python 3.9+ (pure standard library, no third-party dependencies);
-- This repository (clone or download and extract).
+You only need to do two things: **① export your chat history → ② send the project link and the export location to your AI assistant in one sentence**. Everything after — organizing, distilling, proposing candidates, building, writing back — is handled by the AI assistant; you only review and confirm the results at the end.
 
 ### What you do
 
-1. Export your chat history from the relevant AI tool per [Import Sources](#import-sources). Keep raw exports in a local directory outside this repo, not in `input/`; run `python3 import_chats.py --source <source> --path <raw-export-path>` and let the importer write unified Markdown to `input/`.
-2. Hand this repo to the AI you're using (e.g. Codex, Claude Code, Hermes, or DeepSeek Harness) and tell it:
+1. Export your chat history from the relevant AI tool per [Import Sources](#import-sources), and note where the export files are on your machine.
+2. Send the project link to the AI you're using (Codex, Claude Code, Hermes, or DeepSeek Harness, etc.) and say in one sentence:
 
    ```text
-   Take over this selfdistill project:
-   1. Follow docs/intake.md to organize the chat history I provide; keep raw exports in a local directory outside this repo and never commit them; put only unified Markdown in input/;
-   2. Follow prompts/distill.md and read all material from the start; first report your reading boundaries, then propose L1–L4 candidates;
-   3. Confirm each L3 item and any personal/sensitive/high-risk/conflicting content with me individually; only visible, reversible, low-risk general rules may skip per-item confirmation;
-   4. Do not write directly to canonical/, L4, or a resume. After I review the candidates, show the full aggregate diff and wait for my explicit confirmation before writing;
-   5. After writing, run python3 build.py; if writing back to Codex, Hermes, or DeepSeek Harness (DSH), show the diff first and only run install.py after I explicitly confirm.
+   Distill me with this project: https://github.com/ryunana/selfdistill
+   My chat history export is at: <path-to-export-on-your-machine>
    ```
 
+   The AI assistant will clone the project, read the handoff instructions (`AGENTS.md`), import your records, and propose L1–L4 candidates on its own.
 3. Review the candidates and confirm, edit, or reject each one. Confirm the diff once more before any write-back.
 
-> DeepSeek Harness users can [install the selfdistill plugin](#install-the-selfdistill-plugin-optional) so the DSH agent knows this workflow natively — no need to paste the prompt above every time.
+> DeepSeek Harness users can [install the selfdistill plugin](#install-the-selfdistill-plugin-optional) so the DSH agent knows this workflow natively — no need to send the link note above every time.
 
-### What the AI does
+### What the AI assistant does (automatic, no effort from you)
 
-1. Read `docs/intake.md`; keep raw exports in a local directory outside this repo, use `import_chats.py --path <raw-export-path>` to normalize them, and write only unified Markdown into the git-ignored `input/`.
-2. Distill L1–L4 candidates per `prompts/distill.md`; show sources and candidates first, don't touch the canonical profile yet.
-3. Only after the user has processed the candidates and explicitly confirmed the final aggregate diff, write incrementally into `canonical/` (structure per `templates/`; "张三" in this repo is a fictional sample).
-4. Run `python3 build.py` to produce `dist/index.html`, L1–L4 reports, and `dist/codex/`, `dist/hermes/`, `dist/dsh/`.
-5. If the user wants a write-back, run `python3 install.py --target codex` (or `hermes` / `dsh`): show the diff, and only write incrementally after explicit confirmation, never overwriting unrelated content.
+After cloning the project, the AI assistant auto-reads the root `AGENTS.md` handoff instructions and follows them: import → propose candidates → confirm item by item → write `canonical/` → build → write back. See `AGENTS.md` and `prompts/distill.md` for the full flow.
+
+Manual step-by-step instructions (without an AI assistant) are in the sections below.
 
 ## First Distillation: Build L1–L4 from Full History
 
