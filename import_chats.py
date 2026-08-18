@@ -1463,10 +1463,13 @@ def _atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
 def _safe_regular_fd(path: Path) -> int:
     """Open an existing output without following a post-check symlink swap."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    parent_fd = _safe_directory_fd(path.parent)
     try:
-        fd = os.open(path, flags)
+        fd = os.open(path.name, flags, dir_fd=parent_fd)
     except OSError:
         raise ImportError_("输出目标已变化，拒绝访问")
+    finally:
+        os.close(parent_fd)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -1494,6 +1497,22 @@ def _chmod_safe_regular(path: Path, mode: int) -> None:
         os.close(fd)
 
 
+def _safe_path_components(path: Path) -> list[str]:
+    """Return lexical absolute components without resolving user-controlled links."""
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    components = list(absolute.parts[1:])
+    # macOS exposes /var as the fixed system alias /private/var.  Expand only
+    # that exact root alias before the no-follow walk; do not resolve arbitrary
+    # user-controlled ancestors.
+    if components and components[0] == "var":
+        try:
+            if os.readlink("/var") == "private/var":
+                components[:1] = ["private", "var"]
+        except OSError:
+            pass
+    return components
+
+
 def _safe_directory_fd(path: Path) -> int:
     """Walk from / with dir-fd no-follow opens; never trust an ancestor path."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1502,18 +1521,7 @@ def _safe_directory_fd(path: Path) -> int:
     except OSError:
         raise ImportError_("输出目录已变化，拒绝访问")
     try:
-        absolute = Path(os.path.abspath(os.fspath(path)))
-        components = list(absolute.parts[1:])
-        # macOS exposes /var as the fixed system alias /private/var.  Expand
-        # only that exact root alias before the no-follow walk; do not resolve
-        # arbitrary user-controlled ancestors.
-        if components and components[0] == "var":
-            try:
-                if os.readlink("/var") == "private/var":
-                    components[:1] = ["private", "var"]
-            except OSError:
-                pass
-        for component in components:
+        for component in _safe_path_components(path):
             try:
                 child_fd = os.open(component, flags, dir_fd=fd)
             except OSError:
@@ -1526,6 +1534,39 @@ def _safe_directory_fd(path: Path) -> int:
     except BaseException:
         os.close(fd)
         raise
+
+
+def _ensure_safe_directory(path: Path, mode: int = 0o700) -> None:
+    """Create/open a target directory entirely through held no-follow dir fds."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open("/", flags)
+    except OSError:
+        raise ImportError_("输出目录已变化，拒绝访问")
+    try:
+        for component in _safe_path_components(path):
+            try:
+                child_fd = os.open(component, flags, dir_fd=fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                except OSError:
+                    raise ImportError_("无法安全创建输出目录")
+                try:
+                    child_fd = os.open(component, flags, dir_fd=fd)
+                except OSError:
+                    raise ImportError_("输出目录已变化，拒绝访问")
+            except OSError:
+                raise ImportError_("输出目录已变化，拒绝访问")
+            os.close(fd)
+            fd = child_fd
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise ImportError_("输出目录已变化，拒绝访问")
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
 
 
 def _chmod_safe_directory(path: Path, mode: int) -> None:
@@ -1735,8 +1776,7 @@ def load_imported(out_dir: Path) -> dict:
 
 def save_imported(imported: dict, out_dir: Path) -> None:
     _assert_safe_output_root(out_dir)
-    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _chmod_safe_directory(out_dir, 0o700)
+    _ensure_safe_directory(out_dir, 0o700)
     _validate_imported_state(imported, out_dir)
     _validate_state_output_binding(imported, out_dir)
     _atomic_write(imported_path(out_dir), json.dumps(imported, ensure_ascii=False, indent=2) + "\n")
@@ -1762,7 +1802,15 @@ def _escape_managed_markers(text: str) -> str:
 
     # Ownership-looking comments are controls only in the canonical header;
     # render such text inert in bodies without escaping unrelated comments.
-    return re.sub(r"<!--\s*(?:source|conversation_id):[^\r\n]*?-->", escape_ownership, text)
+    text = re.sub(r"<!--\s*(?:source|conversation_id):[^\r\n]*?-->", escape_ownership, text)
+
+    # A complete rendered message heading inside user-controlled body text
+    # would otherwise be indistinguishable from a real writer heading during
+    # state recovery.  Escape only the control prefix; Markdown still displays
+    # the original characters as literal text.
+    return re.sub(
+        r"(?m)^\*\*(?:user|assistant)\*\*（[^\r\n]*?；message_id: [^\r\n]*?）：$",
+        lambda match: r"\*\*" + match.group(0)[2:], text)
 
 
 def _markdown_metadata(value) -> str:
@@ -1861,9 +1909,12 @@ def _validate_state_output_binding(imported: dict, out_dir: Path) -> None:
         if not path.exists():
             raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
         _assert_single_link_regular(path, "状态文件与 Markdown 输出不一致，未修改")
-        ownership = _header_ownership_metadata(_read_safe_text(path))
+        content = _read_safe_text(path)
+        ownership = _header_ownership_metadata(content)
         if ownership != (_markdown_metadata(source), _markdown_metadata(cid)):
             raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+        _before, body, _after = _managed_parts(content, path)
+        entry["message_ids"] = _managed_message_ids(body)
         state_paths.add(_normalized_path(path))
     for path in (entry for entry in out_dir.iterdir() if entry.suffix == ".md"):
         if _normalized_path(path) in state_paths:
@@ -1881,14 +1932,21 @@ def _validate_state_output_binding(imported: dict, out_dir: Path) -> None:
         if key in imported:
             raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
         _before, body, _after = _managed_parts(content, path)
-        rendered_ids = re.findall(r"(?m)^\*\*(?:user|assistant)\*\*（[^\n]*?；message_id: (.*?)）：$", body)
-        message_ids = [_unmarkdown_metadata(mid) for mid in rendered_ids]
-        if any(mid is None for mid in message_ids) or len(message_ids) != len(set(message_ids)):
-            raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+        message_ids = _managed_message_ids(body)
         imported[key] = {
             "path": str(path), "imported_at": today_str(), "title": "恢复的会话",
             "message_ids": message_ids,
         }
+
+
+def _managed_message_ids(body: str) -> list[str]:
+    """Extract only actual writer headings from a managed message block."""
+    rendered_ids = re.findall(
+        r"(?m)^\*\*(?:user|assistant)\*\*（[^\r\n]*?；message_id: (.*?)）：$", body)
+    message_ids = [_unmarkdown_metadata(mid) for mid in rendered_ids]
+    if any(mid is None for mid in message_ids) or len(message_ids) != len(set(message_ids)):
+        raise ImportError_("状态文件与 Markdown 输出不一致，未修改")
+    return message_ids
 
 
 def _assert_no_filename_collision(source: str, cid: str, key: str, path: Path,
@@ -2028,8 +2086,7 @@ def write_conversation(conv: tuple, imported: dict, out_dir: Path, dry_run: bool
         content = _build_content(source, cid, title, exported_at, msgs)
     if dry_run:
         return result
-    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _chmod_safe_directory(out_dir, 0o700)
+    _ensure_safe_directory(out_dir, 0o700)
     _atomic_write(path, content)
     imported[key] = _state_entry(path, title, msgs, source, cid, _branch_metadata)
     return result

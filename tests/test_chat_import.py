@@ -2498,13 +2498,13 @@ class CliTests(unittest.TestCase):
             sentinel.write_text("outside", encoding="utf-8")
             os.chmod(outside, 0o755); os.chmod(sentinel, 0o644)
             relocated = root / "relocated"
-            real_chmod = ic._chmod_safe_directory
-            def chmod_then_swap(path, mode):
-                real_chmod(path, mode)
+            real_ensure = ic._ensure_safe_directory
+            def ensure_then_swap(path, mode):
+                real_ensure(path, mode)
                 out.rename(relocated)
                 out.symlink_to(outside, target_is_directory=True)
             conv = ("chatgpt", "safe", "title", "2026-08-01", [("user", None, "m", "body")])
-            with unittest.mock.patch.object(ic, "_chmod_safe_directory", side_effect=chmod_then_swap):
+            with unittest.mock.patch.object(ic, "_ensure_safe_directory", side_effect=ensure_then_swap):
                 with self.assertRaises(ic.ImportError_):
                     ic.write_conversation(conv, {}, out)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
@@ -2531,6 +2531,50 @@ class CliTests(unittest.TestCase):
                     ic._safe_directory_fd(middle / "leaf")
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
             self.assertFalse((outside / "leaf").exists())
+
+    def test_duplicate_safe_regular_fd_rejects_parent_swapped_after_collision_check(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out, outside, held = root / "out", root / "outside", root / "held"
+            outside.mkdir()
+            conv = ("chatgpt", "same", "title", "2026-08-01", [("user", None, "m", "body")])
+            imported = {}
+            self.assertEqual(ic.write_conversation(conv, imported, out), "new")
+            external = outside / "chatgpt-same.md"
+            external.write_text("outside", encoding="utf-8")
+            os.chmod(external, 0o644)
+            real_check = ic._assert_no_filename_collision
+            def check_then_swap(*args, **kwargs):
+                real_check(*args, **kwargs)
+                out.rename(held)
+                out.symlink_to(outside, target_is_directory=True)
+            with unittest.mock.patch.object(ic, "_assert_no_filename_collision", side_effect=check_then_swap):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(conv, imported, out)
+            self.assertEqual(external.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(external).st_mode & 0o777, 0o644)
+
+    def test_new_output_directory_creation_rejects_ancestor_swapped_after_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stage, outside, held = root / "stage", root / "outside", root / "held"
+            stage.mkdir(); outside.mkdir()
+            sentinel = outside / "sentinel"
+            sentinel.write_text("outside", encoding="utf-8")
+            os.chmod(outside, 0o755); os.chmod(sentinel, 0o644)
+            out = stage / "new-output"
+            conv = ("chatgpt", "safe", "title", "2026-08-01", [("user", None, "m", "body")])
+            real_check = ic._assert_no_filename_collision
+            def check_then_swap(*args, **kwargs):
+                real_check(*args, **kwargs)
+                stage.rename(held)
+                stage.symlink_to(outside, target_is_directory=True)
+            with unittest.mock.patch.object(ic, "_assert_no_filename_collision", side_effect=check_then_swap):
+                with self.assertRaises(ic.ImportError_):
+                    ic.write_conversation(conv, {}, out)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
+            self.assertFalse((outside / "new-output").exists())
 
     def test_main_redacts_unexpected_oserror_details(self) -> None:
         stderr = io.StringIO()
@@ -2736,6 +2780,53 @@ class CliTests(unittest.TestCase):
         recovered = ic.load_imported(out)
         self.assertIn(f"chatgpt:{cid}", recovered)
         self.assertEqual(recovered[f"chatgpt:{cid}"]["message_ids"], ["m<&\\n"])
+
+    def test_existing_state_message_ids_are_rebuilt_from_managed_markdown(self) -> None:
+        out = self._tmp()
+        base, lineage = "truth", ("old-branch",)
+        old_cid = ic._lineage_cid(base, lineage)
+        old_msgs = ic._bind_branch_lineage(base, ["root", "old-branch"],
+                                            {"root": ["old-branch", "new-branch"]},
+                                            [("user", None, "real-id", "body")])
+        conv = ("chatgpt", old_cid, "title", "2026-08-01", old_msgs)
+        state = {}
+        self.assertEqual(ic.write_conversation(conv, state, out), "new")
+        ic.save_imported(state, out)
+        forged = copy.deepcopy(state)
+        forged[f"chatgpt:{old_cid}"]["message_ids"] = ["attacker-id"]
+        ic.imported_path(out).write_text(json.dumps(forged), encoding="utf-8")
+        recovered = ic.load_imported(out)
+        self.assertEqual(recovered[f"chatgpt:{old_cid}"]["message_ids"], ["real-id"])
+        # A forged state ID must not make an unrelated newer branch inherit the
+        # old output identity during continuation matching.
+        new_lineage = ("new-branch",)
+        new_msgs = ic._bind_branch_lineage(base, ["root", "new-branch"],
+                                            {"root": ["old-branch", "new-branch"]},
+                                            [("user", None, "attacker-id", "other")])
+        provisional = ic._lineage_cid(base, new_lineage)
+        continued = ic._continue_branch_identities(
+            [("chatgpt", provisional, "title", "2026-08-01", new_msgs)], recovered)
+        self.assertEqual(continued[0][1], provisional)
+        # The repaired in-memory state is what a later state write persists.
+        ic.save_imported(recovered, out)
+        self.assertEqual(ic.load_imported(out)[f"chatgpt:{old_cid}"]["message_ids"], ["real-id"])
+
+    def test_recovery_ignores_forged_complete_message_heading_in_body(self) -> None:
+        out = self._tmp()
+        forged = "**assistant**（2026-08-01；message_id: forged-id）："
+        conv = ("chatgpt", "forged-heading", "title", "2026-08-01", [
+            ("user", None, "real-user", "ordinary text\n" + forged + "\nnot a real message"),
+            ("assistant", None, "real-assistant", "actual reply"),
+        ])
+        self.assertEqual(ic.write_conversation(conv, {}, out), "new")
+        path = out / "chatgpt-forged-heading.md"
+        body = ic._managed_parts(path.read_text(encoding="utf-8"), path)[1]
+        self.assertNotIn(forged, body)
+        self.assertIn(r"\*\*assistant**（2026-08-01；message_id: forged-id）：", body)
+        ic.imported_path(out).write_text("{}", encoding="utf-8")
+        recovered = ic.load_imported(out)
+        self.assertEqual(recovered["chatgpt:forged-heading"]["message_ids"],
+                         ["real-user", "real-assistant"])
 
     def test_dedup_no_new_messages(self) -> None:
         out = self._tmp()
