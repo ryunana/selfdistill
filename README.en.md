@@ -18,8 +18,6 @@ Distill your chat history with AI — with **AI assistance + human confirmation*
 - [First Distillation: Build L1–L4 from Full History](#first-distillation-build-l1l4-from-full-history)
 - [Import Sources](#import-sources)
 - [Outputs & Write-back Targets](#outputs--write-back-targets)
-- [Re-import a Batch of New Chats](#re-import-a-batch-of-new-chats)
-- [Keeping Your Profile Up to Date](#keeping-your-profile-up-to-date)
 - [Work Evidence: Organize Project Facts, Don't Auto-Package Outcomes](#work-evidence-organize-project-facts-dont-auto-package-outcomes)
 - [Privacy & Security](#privacy--security)
 - [Dependencies](#dependencies)
@@ -143,21 +141,6 @@ dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
 
 - The plugin is a zero-dependency bundle (`selfdistill-dsh`); after install, a `selfdistill` skill appears in the agent's skill catalog;
 - Once published to npm: `dsh plugin --profile web add selfdistill-dsh`.
-
-## Re-import a Batch of New Chats
-
-If you have a new batch of complete chat history, append the normalized content to `input/`, re-run `prompts/distill.md`, confirm the candidates manually, then run `python3 build.py` (and confirm `install.py` if a write-back is needed). This flow suits batch imports of new chats and needs no scheduler.
-
-## Keeping Your Profile Up to Date
-
-After the first distillation, if what's new is explicit corrections, expression drift, or boundary additions from daily conversations, use the lighter inbox flow instead of re-importing the whole batch:
-
-1. Create a candidate JSON in `inbox/` per [`schemas/inbox-v2.json`](schemas/inbox-v2.json). Candidates straight from a conversation may leave `evidence_ids` empty with status `pending`.
-2. Run `python3 distill_audit.py audit`. It recursively reads `canonical/**/*.md` and `inbox/*.json` and produces a full `reports/latest/` evidence pack and a six-dimension coverage report; `inbox/README.md` is just a description.
-   > Every `audit` run rebuilds and replaces the whole `reports/latest/`. If it already contains unprocessed `discoveries.md` or `candidates/`, finish reviewing first, or save the files you need outside `reports/latest/`.
-3. Hand [`prompts/rediscovery.md`](prompts/rediscovery.md) to the AI of your choice and ask it to read `reports/latest/evidence.md` end to end. It may only write findings and pending candidates back to `reports/`, never modify `canonical/` itself.
-4. Run `python3 distill_audit.py verify reports/latest` to confirm sources haven't drifted, candidates are well-formed, and every evidence reference is real — then accept, reject, or mark each one unknown. `verify` does not judge whether a candidate's conclusion is correct, nor can it prove the AI read all evidence; human review is still required. `accepted` only means you accepted the candidate, not that it has been written to `canonical/`.
-5. Update `canonical/` yourself with the confirmed items, then keep using `python3 build.py`; when a write-back to Codex, Hermes, or DSH is actually needed, show the diff and explicitly confirm `install.py --target ...`.
 
 ## Work Evidence: Organize Project Facts, Don't Auto-Package Outcomes
 

@@ -18,8 +18,6 @@
 - [首次蒸馏：从完整历史建立 L1–L4](#首次蒸馏从完整历史建立-l1l4)
 - [导入来源](#导入来源)
 - [产出与写回目标](#产出与写回目标)
-- [重新导入一批新对话](#重新导入一批新对话)
-- [持续更新自己的档案](#持续更新自己的档案)
 - [工作证据：整理项目事实，不自动包装成果](#工作证据整理项目事实不自动包装成果)
 - [隐私与安全](#隐私与安全)
 - [依赖](#依赖)
@@ -143,21 +141,6 @@ dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
 
 - 插件包为零依赖 bundle（`selfdistill-dsh`），安装后 agent 的 skill 目录里出现 `selfdistill`；
 - 发布到 npm 后可直接 `dsh plugin --profile web add selfdistill-dsh`。
-
-## 重新导入一批新对话
-
-如果新增的是一批完整聊天记录，继续把整理后的内容追加到 `input/`，重跑 `prompts/distill.md`，人工确认候选后再运行 `python3 build.py`（确实需要写回时再确认 `install.py`）。这个流程适合批量导入新的聊天记录，不需要任何调度器。
-
-## 持续更新自己的档案
-
-第一次蒸馏完成后，如果新增的是日常对话中的明确修正、表达偏差或边界补充，可以走更轻量的 inbox 流程，不必重新导入整批聊天记录：
-
-1. 按 [`schemas/inbox-v2.json`](schemas/inbox-v2.json) 在 `inbox/` 新建一个候选 JSON。直接来自对话的候选可以先把 `evidence_ids` 留空，状态使用 `pending`。
-2. 运行 `python3 distill_audit.py audit`。它会递归读取 `canonical/**/*.md` 和 `inbox/*.json`，生成完整的 `reports/latest/` 证据包与六维覆盖报告；`inbox/README.md` 只作为说明登记。
-   > 每次运行 `audit` 都会重建并替换整个 `reports/latest/`。如果里面已有尚未处理的 `discoveries.md` 或 `candidates/`，请先完成审阅，或把需要保留的文件另存到 `reports/latest/` 之外。
-3. 把 [`prompts/rediscovery.md`](prompts/rediscovery.md) 交给你当前选择的 AI，并要求它从头到尾阅读 `reports/latest/evidence.md`。要求它只把发现和待确认候选写回 `reports/`，不要修改 `canonical/`。
-4. 运行 `python3 distill_audit.py verify reports/latest`，确认来源没有漂移、候选格式正确、所有 evidence 引用真实存在，再逐条接受、拒绝或标记为未知。`verify` 不判断候选结论是否正确，也不能证明 AI 已完整阅读全部证据，最终仍需人工审阅；`accepted` 只表示你接受了候选，不表示它已经写入 `canonical/`。
-5. 由你人工把确认后的内容更新到 `canonical/`，然后继续使用原有 `python3 build.py`；确实需要写回 Codex、Hermes 或 DSH 时，再展示 diff 并明确确认 `install.py --target ...`。
 
 ## 工作证据：整理项目事实，不自动包装成果
 
