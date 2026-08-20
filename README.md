@@ -27,7 +27,7 @@
 
 ## 这是什么
 
-selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude / Codex / Gemini 等工具里的历史对话，提炼成 L1–L4 分级信息，并写回 AI 工具（Codex / Hermes / DeepSeek Harness）：
+selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude / Codex / Gemini 等工具里的历史对话，提炼成 L1–L4 分级信息，并写回 AI 工具（Codex / Hermes / DeepSeek Harness / WorkBuddy）：
 
 | 层级 | 内容 | 通俗解释 | 在 AI 工具里的加载方式 |
 |------|------|----------|------------------------|
@@ -55,7 +55,7 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude
 ### 你要做的
 
 1. 按 [导入来源](#导入来源) 在对应 AI 工具里导出聊天记录，记下导出文件在本机的存放位置。
-2. 把项目链接发给你正在使用的 AI（Codex、Claude Code、Hermes 或 DeepSeek Harness 等），一句话说明：
+2. 把项目链接发给你正在使用的 AI（Codex、Claude Code、Hermes、DeepSeek Harness 或 WorkBuddy 等），一句话说明：
 
    ```text
    按这个项目蒸馏我：https://github.com/ryunana/selfdistill
@@ -65,7 +65,7 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude
    AI 助手会自己 clone 项目、读取接手指令（`AGENTS.md`）、导入记录、提出 L1–L4 候选。
 3. 查看 AI 给出的候选，逐条确认、修改或拒绝；写回 AI 工具前再确认一次 diff。
 
-> 使用 DeepSeek Harness 的用户可以[安装 selfdistill 插件](#安装-selfdistill-插件可选)，让 DSH 的 agent 直接掌握这套工作流，无需每次发送上面的链接说明。
+> 使用 DeepSeek Harness 或 WorkBuddy 的用户可以[安装 selfdistill 插件](#安装-selfdistill-插件可选)，让 agent 直接掌握这套工作流，无需每次发送上面的链接说明。
 
 ### AI 助手会做什么（自动，无需你操心）
 
@@ -121,8 +121,18 @@ open dist/index.html      # L1–L4 分层架构、内容分布、设计原则�
 | Codex | `~/.codex`（AGENTS.md + profile/ + skills/） | `python3 install.py --target codex` | Codex 自动读取 AGENTS.md，其余按需 |
 | Hermes | `~/.hermes/skills/` | `python3 install.py --target hermes` | Hermes skill 机制，按需加载 |
 | DeepSeek Harness | `$DSH_HOME`（默认 `~/.dsh`） | `python3 install.py --target dsh` | persona 常驻 L1，L2/L3/L4 为 skill 按需加载 |
+| WorkBuddy | `~/.workbuddy`（MEMORY.md + skills/） | `python3 install.py --target workbuddy` | L1 合并进 MEMORY.md 每次会话常驻，L2/L3/L4 为 skill 按需加载 |
 
 每次写回都**先展示 diff，确认后才写入**；重复安装增量合并，不覆盖无关内容。
+
+#### 写回 WorkBuddy 的隐私分级
+
+| 内容 | 写入位置 | 加载时机 |
+|------|----------|----------|
+| L1 协作契约 | `~/.workbuddy/MEMORY.md`（用户级记忆，distill 标记块） | 每个新会话常驻（短、非敏感） |
+| L2 决策逻辑 | `~/.workbuddy/skills/selfdistill-decision-logic/SKILL.md` | 按需加载 |
+| L3 个人事实 | `~/.workbuddy/skills/selfdistill-user-profile/SKILL.md` | 按需加载；私密 L3 默认不写（`--include-private` 才包含） |
+| L4 领域打法 | `~/.workbuddy/skills/selfdistill-<领域>/SKILL.md` | 按需加载 |
 
 #### 写回 DeepSeek Harness 的隐私分级
 
@@ -135,14 +145,23 @@ open dist/index.html      # L1–L4 分层架构、内容分布、设计原则�
 
 #### 安装 selfdistill 插件（可选）
 
-写回是把「档案」装进 DSH；插件则是让 DSH 的 agent 直接掌握 selfdistill **工作流**（整理 → 提炼 → 逐条确认 → 构建 → 写回），安装后即可在 DSH 内完成整套流程：
+写回是把「档案」装进 AI 工具；插件则是让 agent 直接掌握 selfdistill **工作流**（整理 → 提炼 → 逐条确认 → 构建 → 写回），安装后即可在对应工具内完成整套流程：
+
+**WorkBuddy**（把 `selfdistill` 技能复制到用户级技能目录）：
+
+```bash
+mkdir -p ~/.workbuddy/skills && cp -r workbuddy/skills/selfdistill ~/.workbuddy/skills/
+# 重启 WorkBuddy 生效；之后直接说「按 selfdistill 蒸馏我」即可
+```
+
+**DeepSeek Harness**：
 
 ```bash
 dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
 # 重启 dsh web 生效
 ```
 
-- 插件包为零依赖 bundle（`selfdistill-dsh`），安装后 agent 的 skill 目录里出现 `selfdistill`；
+- DSH 插件包为零依赖 bundle（`selfdistill-dsh`），安装后 agent 的 skill 目录里出现 `selfdistill`；
 - 发布到 npm 后可直接 `dsh plugin --profile web add selfdistill-dsh`。
 
 ## 持续更新自己的档案

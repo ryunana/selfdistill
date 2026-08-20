@@ -27,7 +27,7 @@ Distill your chat history with AI — with **AI assistance + human confirmation*
 
 ## What Is This
 
-selfdistill is an "AI self-distillation" toolkit: it takes your chat history from tools like ChatGPT / Claude / Codex / Gemini and distills it into L1–L4 structured information, then writes it back to AI tools (Codex / Hermes / DeepSeek Harness):
+selfdistill is an "AI self-distillation" toolkit: it takes your chat history from tools like ChatGPT / Claude / Codex / Gemini and distills it into L1–L4 structured information, then writes it back to AI tools (Codex / Hermes / DeepSeek Harness / WorkBuddy):
 
 | Level | Content | In plain words | How AI tools load it |
 |-------|---------|----------------|----------------------|
@@ -55,7 +55,7 @@ You only need to do two things: **① export your chat history → ② send the 
 ### What you do
 
 1. Export your chat history from the relevant AI tool per [Import Sources](#import-sources), and note where the export files are on your machine.
-2. Send the project link to the AI you're using (Codex, Claude Code, Hermes, or DeepSeek Harness, etc.) and say in one sentence:
+2. Send the project link to the AI you're using (Codex, Claude Code, Hermes, DeepSeek Harness, or WorkBuddy, etc.) and say in one sentence:
 
    ```text
    Distill me with this project: https://github.com/ryunana/selfdistill
@@ -65,7 +65,7 @@ You only need to do two things: **① export your chat history → ② send the 
    The AI assistant will clone the project, read the handoff instructions (`AGENTS.md`), import your records, and propose L1–L4 candidates on its own.
 3. Review the candidates and confirm, edit, or reject each one. Confirm the diff once more before any write-back.
 
-> DeepSeek Harness users can [install the selfdistill plugin](#install-the-selfdistill-plugin-optional) so the DSH agent knows this workflow natively — no need to send the link note above every time.
+> DeepSeek Harness and WorkBuddy users can [install the selfdistill plugin](#install-the-selfdistill-plugin-optional) so the agent knows this workflow natively — no need to send the link note above every time.
 
 ### What the AI assistant does (automatic, no effort from you)
 
@@ -121,8 +121,18 @@ open dist/index.html      # L1–L4 architecture, content distribution, principl
 | Codex | `~/.codex` (AGENTS.md + profile/ + skills/) | `python3 install.py --target codex` | Codex reads AGENTS.md automatically; the rest on demand |
 | Hermes | `~/.hermes/skills/` | `python3 install.py --target hermes` | Hermes skill mechanism, loaded on demand |
 | DeepSeek Harness | `$DSH_HOME` (default `~/.dsh`) | `python3 install.py --target dsh` | persona always carries L1; L2/L3/L4 are on-demand skills |
+| WorkBuddy | `~/.workbuddy` (MEMORY.md + skills/) | `python3 install.py --target workbuddy` | L1 merged into MEMORY.md, resident every session; L2/L3/L4 are on-demand skills |
 
 Every write-back **shows a diff first and writes only after confirmation**; re-installs merge incrementally and never overwrite unrelated content.
+
+#### Privacy levels when writing back to WorkBuddy
+
+| Content | Where it goes | When it loads |
+|---------|---------------|---------------|
+| L1 Collaboration Contract | `~/.workbuddy/MEMORY.md` (user-level memory, distill-marked block) | Loaded in every new session (short, non-sensitive) |
+| L2 Decision Logic | `~/.workbuddy/skills/selfdistill-decision-logic/SKILL.md` | On demand |
+| L3 Personal Facts | `~/.workbuddy/skills/selfdistill-user-profile/SKILL.md` | On demand; private L3 not written by default (`--include-private` to include) |
+| L4 Domain Playbooks | `~/.workbuddy/skills/selfdistill-<domain>/SKILL.md` | On demand |
 
 #### Privacy levels when writing back to DeepSeek Harness
 
@@ -135,14 +145,23 @@ Every write-back **shows a diff first and writes only after confirmation**; re-i
 
 #### Install the selfdistill plugin (optional)
 
-Write-back installs your *profile* into DSH; the plugin instead teaches the DSH agent the selfdistill *workflow* (organize → distill → confirm → build → write back), so the whole process can run inside DSH:
+Write-back installs your *profile* into an AI tool; the plugin instead teaches the agent the selfdistill *workflow* (organize → distill → confirm → build → write back), so the whole process can run inside that tool:
+
+**WorkBuddy** (copy the `selfdistill` skill into the user-level skill directory):
+
+```bash
+mkdir -p ~/.workbuddy/skills && cp -r workbuddy/skills/selfdistill ~/.workbuddy/skills/
+# restart WorkBuddy to activate; then just say "distill me with selfdistill"
+```
+
+**DeepSeek Harness**:
 
 ```bash
 dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
 # restart dsh web to activate
 ```
 
-- The plugin is a zero-dependency bundle (`selfdistill-dsh`); after install, a `selfdistill` skill appears in the agent's skill catalog;
+- The DSH plugin is a zero-dependency bundle (`selfdistill-dsh`); after install, a `selfdistill` skill appears in the agent's skill catalog;
 - Once published to npm: `dsh plugin --profile web add selfdistill-dsh`.
 
 ## Keep Your Profile Up to Date
