@@ -7,6 +7,7 @@ import copy
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 import zipfile
@@ -16,6 +17,14 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# 时区相关断言依赖本地时区（fmt_time 对带时区 ISO 时间做 astimezone），
+# 固定为 Asia/Shanghai 保证 CI（Ubuntu UTC）与本地结果一致。
+os.environ["TZ"] = "Asia/Shanghai"
+try:
+    time.tzset()
+except AttributeError:  # pragma: no cover - Windows
+    pass
 
 import import_chats as ic  # noqa: E402
 
@@ -1882,6 +1891,12 @@ class FmtTimeTests(unittest.TestCase):
         self.assertEqual(ic.fmt_time("2026年6月3日 21:52:40 CST"), "2026-06-03 21:52")
         self.assertEqual(ic.fmt_time("Aug 2, 2026, 3:00 PM"), "2026-08-02 15:00")
         self.assertIsNone(ic.fmt_time("not a date"))
+
+    def test_millisecond_timestamp_is_normalized(self) -> None:
+        # 13 位毫秒时间戳（WorkBuddy 等本地来源）应与对应秒值结果一致。
+        self.assertEqual(ic.fmt_time(1787212277149),
+                         ic.fmt_time(1787212277.149))
+        self.assertIsNotNone(ic.fmt_time(1787212277149))
         self.assertIsNone(ic.fmt_time(None))
 
     def test_bool_timestamp_is_rejected_not_epoch(self) -> None:
@@ -3268,6 +3283,211 @@ class CliTests(unittest.TestCase):
             report = stream.getvalue()
             self.assertIn("本地 JSONL UTF-8 解码失败", report)
             self.assertNotIn("secret-local-filename", report)
+
+
+class WorkBuddyImportTests(unittest.TestCase):
+    def _session(self, td: Path) -> Path:
+        records = [
+            {"id": "seed-inject", "timestamp": 1787212277149, "type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": '<system-reminder data-role="user-context">\n<user_info>\nOS Version: darwin\n</user_info>\n<identity_context>\nidentity block\n</identity_context>\n<additional_data>\n<current_time>2026-08-20T00:00:00Z</current_time>\n</additional_data>\n</system-reminder>'}],
+             "sessionId": "wb-session-0001", "cwd": "/tmp"},
+            {"timestamp": 1787212279041, "type": "ai-title", "aiTitle": "让 selfdistill 支持 workbuddy",
+             "sessionId": "wb-session-0001", "cwd": "/tmp"},
+            {"id": "seed-think", "parentId": "seed-inject", "timestamp": 1787212280000, "type": "reasoning",
+             "content": [{"type": "thinking", "text": "内部思考过程"}], "sessionId": "wb-session-0001"},
+            {"id": "seed-asst", "parentId": "seed-think", "timestamp": 1787212281000, "type": "message",
+             "role": "assistant", "content": [{"type": "output_text", "text": "好的,我来分析。"}],
+             "sessionId": "wb-session-0001", "cwd": "/tmp"},
+            {"id": "seed-call", "parentId": "seed-asst", "timestamp": 1787212282000, "type": "function_call",
+             "callId": "call-1", "name": "WebFetch", "arguments": "{}", "sessionId": "wb-session-0001"},
+            {"id": "seed-result", "parentId": "seed-asst", "timestamp": 1787212283000, "type": "function_call_result",
+             "callId": "call-1", "status": "ok", "output": "{...}", "sessionId": "wb-session-0001"},
+            {"id": "seed-user", "parentId": "seed-result", "timestamp": 1787212284000, "type": "message",
+             "role": "user", "content": [{"type": "input_text", "text": "请继续"}],
+             "sessionId": "wb-session-0001", "cwd": "/tmp"},
+        ]
+        p = td / "wb-session-0001.jsonl"
+        p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+        return p
+
+    def test_parse_workbuddy_keeps_real_messages_and_title(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            events = []
+            convs = ic.parse_workbuddy(self._session(Path(td)), events)
+            self.assertIsNotNone(convs)
+            source, cid, title, _exported, msgs = convs[0]
+            self.assertEqual(source, "workbuddy")
+            self.assertEqual(cid, "wb-session-0001")
+            self.assertEqual(title, "让 selfdistill 支持 workbuddy")
+            self.assertEqual([m[2] for m in msgs], ["seed-asst", "seed-user"])
+            self.assertIn("好的,我来分析。", msgs[0][3])
+            self.assertIn("请继续", msgs[1][3])
+
+    def test_parse_workbuddy_excludes_injection_and_process_records(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            events = []
+            convs = ic.parse_workbuddy(self._session(Path(td)), events)
+            joined = "\n".join(m[3] for m in convs[0][4])
+            self.assertNotIn("system-reminder", joined)
+            self.assertNotIn("identity block", joined)
+            self.assertNotIn("内部思考过程", joined)
+            expected = [r for r in events if r.startswith("内部内容已排除")]
+            self.assertGreaterEqual(len(expected), 3)
+            self.assertNotIn("未知 WorkBuddy 顶层记录类型", events)
+
+    def test_workbuddy_classified_as_auto_and_claude_not_confused(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = self._session(Path(td))
+            self.assertEqual(ic._classify_local_file(p, "auto"), "workbuddy")
+        with tempfile.TemporaryDirectory() as td:
+            claude = Path(td) / "claude.jsonl"
+            claude.write_text(json.dumps({"type": "user", "uuid": "u1",
+                                          "message": {"role": "user", "content": "hi"}}), encoding="utf-8")
+            self.assertEqual(ic._classify_local_file(claude, "auto"), "claude")
+
+    def test_workbuddy_millisecond_timestamps_and_exported_at(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            events = []
+            convs = ic.parse_workbuddy(self._session(Path(td)), events)
+            _src, _cid, _title, exported_at, msgs = convs[0]
+            # 13 位毫秒时间戳被换算成秒并正确格式化；exported_at 取最后消息日期。
+            self.assertEqual(msgs[0][1],
+                             datetime.fromtimestamp(1787212281).strftime("%Y-%m-%d %H:%M"))
+            self.assertEqual(exported_at, "2026-08-20")
+
+    def test_workbuddy_preserves_user_written_xml(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "xml.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "请解释 <user_info>示例资料</user_info> 这段 XML"}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "这是解释"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_workbuddy(p, [])
+            user_text = convs[0][4][0][3]
+            self.assertEqual(user_text, "请解释 <user_info>示例资料</user_info> 这段 XML")
+
+    def test_workbuddy_unknown_content_block_warns_and_keeps_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "unknown-block.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "future_visible", "text": "未来可见正文"}], "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            events = []
+            convs = ic.parse_workbuddy(p, events)
+            self.assertIn("未来可见正文", convs[0][4][0][3])   # 未知块文本被保留
+            self.assertIn("未知 WorkBuddy 内容块类型", events)  # 并明确告警，不是内部排除
+
+    def test_workbuddy_subagents_excluded_from_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "subagents").mkdir(parents=True)
+            main = root / "sess-main.jsonl"
+            main.write_text(json.dumps({"type": "message", "role": "user",
+                                        "content": [{"type": "input_text", "text": "hi"}],
+                                        "sessionId": "sess-main"}), encoding="utf-8")
+            sub = root / "subagents" / "agent-x.jsonl"
+            sub.write_text(json.dumps({"type": "message", "role": "user",
+                                       "content": [{"type": "input_text", "text": "subtask"}],
+                                       "sessionId": "agent-x"}), encoding="utf-8")
+            found, failures = ic.discover_local_path(root, None, (), "workbuddy")
+            self.assertEqual(len(found), 1)
+            self.assertTrue(found[0][6].endswith("sess-main.jsonl"))
+            self.assertTrue(any("子代理" in r for _ref, r in failures))
+
+    def test_workbuddy_discovered_without_path_and_since_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            old = root / "old.jsonl"
+            old.write_text(json.dumps({"type": "message", "role": "user",
+                                       "content": [{"type": "input_text", "text": "旧消息"}],
+                                       "sessionId": "old", "timestamp": 1750000001000}), encoding="utf-8")
+            new = root / "new.jsonl"
+            new.write_text(json.dumps({"type": "message", "role": "user",
+                                       "content": [{"type": "input_text", "text": "新消息"}],
+                                       "sessionId": "new", "timestamp": 1787212284000}), encoding="utf-8")
+            found = ic.discover_local(since="2026-08-01", roots=(("workbuddy", str(root), "*.jsonl"),))
+            self.assertEqual(len(found), 1)
+            self.assertTrue(found[0][6].endswith("new.jsonl"))
+
+    def test_workbuddy_envelope_plus_user_query(self) -> None:
+        # 真实格式：平台前置 envelope + <user_query> 用户正文 → 只保留正文。
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "env-query.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text":
+                              '<system-reminder data-role="user-context">\n<user_info>\nOS: darwin\n</user_info>\n</system-reminder>\n<user_query>这是我的真实问题</user_query>'}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_workbuddy(p, [])
+            user_text = convs[0][4][0][3]
+            self.assertEqual(user_text, "这是我的真实问题")
+            self.assertNotIn("system-reminder", user_text)
+            self.assertNotIn("user_query", user_text)
+            self.assertNotIn("darwin", user_text)
+
+    def test_workbuddy_envelope_plus_plain_text(self) -> None:
+        # 前置 envelope + 普通正文（无 user_query 包裹）→ 保留正文。
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "env-plain.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text":
+                              '<system-reminder data-role="user-context">\n<additional_data>\n<current_time>x</current_time>\n</additional_data>\n</system-reminder>\n直接说正文'}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_workbuddy(p, [])
+            self.assertEqual(convs[0][4][0][3], "直接说正文")
+
+    def test_workbuddy_user_written_full_tag_preserved(self) -> None:
+        # 用户自写的完整 <system-reminder> 标签（无 data-role="user-context"）原样保留。
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "user-tag.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text":
+                              "请解释 <system-reminder>示例</system-reminder> 的含义"}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_workbuddy(p, [])
+            self.assertEqual(convs[0][4][0][3], "请解释 <system-reminder>示例</system-reminder> 的含义")
+
+    def test_workbuddy_known_block_non_string_text_warns(self) -> None:
+        # 已知块 text 非空非字符串 → 非预期结构告警（不能归入内部排除）。
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "drift.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": {"nested": "visible"}}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            events = []
+            convs = ic.parse_workbuddy(p, events)
+            self.assertIsNotNone(convs)
+            # 非预期结构告警（不以"内部内容已排除"开头 → 会被报告层当失败，
+            # 使 dry-run / 退出码暴露 schema drift）
+            self.assertIn("结构损坏：WorkBuddy 内容块 text 不是字符串", events)
+            self.assertTrue(any(not r.startswith("内部内容已排除") for r in events))
 
 
 if __name__ == "__main__":

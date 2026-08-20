@@ -40,6 +40,7 @@ SOURCES = ("chatgpt", "gemini", "deepseek", "local")
 LOCAL_ROOTS = (
     ("codex", "~/.codex/sessions", "rollout-*.jsonl"),
     ("claude", "~/.claude/projects", "*.jsonl"),
+    ("workbuddy", "~/.workbuddy/projects", "*.jsonl"),
 )
 
 SKIP_EMPTY = "无消息"
@@ -74,8 +75,12 @@ def fmt_time(value) -> Optional[str]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         # bool is an int subclass; malformed exports with create_time: true
         # must not render as 1970-01-01.
+        # 13 位毫秒时间戳（WorkBuddy 等本地来源）先换算成秒再格式化。
+        epoch = value
+        if epoch > 10 ** 12:
+            epoch = epoch / 1000.0
         try:
-            return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M")
         except (OSError, ValueError, OverflowError):
             return None
     s = str(value).strip()
@@ -1415,6 +1420,161 @@ def _first_user_snippet(msgs: list) -> str:
     return ""
 
 
+# ---------- 解析器：本地 WorkBuddy ----------
+#
+# WorkBuddy 桌面版把每个会话写为 ~/.workbuddy/projects/<工作区>/<sessionId>.jsonl，
+# 每行一个扁平 JSON 事件；type=message 记录带 role + content 块数组，
+# user 用 input_text 块、assistant 用 output_text 块。reasoning / function_call /
+# function_call_result / file-history-snapshot / ai-title 是过程记录，不入 Markdown。
+
+_WORKBUDDY_KNOWN_NON_MESSAGE_TYPES = {
+    "reasoning", "function_call", "function_call_result",
+    "file-history-snapshot", "ai-title",
+}
+_WORKBUDDY_KNOWN_CONTENT_BLOCK_TYPES = {"input_text", "output_text"}
+# WorkBuddy 每条 user 消息可能带平台前置注入：一个带 data-role="user-context"
+# 的 <system-reminder> envelope（内含 user_info / identity_context /
+# additional_data / memory_and_skills_reminder 等），随后是 <user_query> 包裹的
+# 用户正文。只剥离带该平台特征的前置 envelope；用户自写的 <system-reminder>/
+# <user_info> 等标签没有这个属性，必须原样保留。
+_WORKBUDDY_PLATFORM_ENVELOPE = re.compile(
+    r"^\s*<system-reminder\b[^>]*data-role=[\"']user-context[\"'][^>]*>.*?</system-reminder>\s*",
+    re.I | re.S)
+_WORKBUDDY_USER_QUERY = re.compile(
+    r"^\s*<user_query>\s*(.*?)\s*</user_query>\s*$", re.I | re.S)
+
+
+def _strip_workbuddy_internal(text: str) -> str:
+    """剥离 WorkBuddy 平台前置注入 envelope；非平台文本原样保留。"""
+    m = _WORKBUDDY_PLATFORM_ENVELOPE.match(text)
+    if not m:
+        return text
+    rest = text[m.end():].strip()
+    q = _WORKBUDDY_USER_QUERY.match(rest)
+    if q:
+        return q.group(1).strip()
+    return rest
+
+
+def parse_workbuddy(path: Path, events: Optional[list[str]] = None) -> Optional[list]:
+    msgs: list = []
+    session_ids: set[str] = set()
+    ai_title: Optional[str] = None
+    try:
+        fh = path.open(encoding="utf-8")
+    except OSError as e:
+        raise ImportError_("无法读取 WorkBuddy JSONL")
+    try:
+        with fh:
+            for i, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    if events is not None:
+                        events.append(f"损坏 JSONL 行：WorkBuddy 第 {i} 行")
+                    continue
+                if not isinstance(d, dict):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：WorkBuddy 第 {i} 行")
+                    continue
+                if d.get("sessionId") is not None:
+                    session_id = _usable_conversation_id(d.get("sessionId"))
+                    if session_id is None:
+                        raise ImportError_("WorkBuddy sessionId 无效")
+                    session_ids.add(session_id)
+                    if len(session_ids) > 1:
+                        raise ImportError_("WorkBuddy sessionId 不一致")
+                dtype = d.get("type")
+                if not isinstance(dtype, str):
+                    if events is not None:
+                        events.append(f"结构损坏 JSONL 行：WorkBuddy 第 {i} 行 type 不是字符串")
+                    continue
+                if dtype == "ai-title":
+                    t = d.get("aiTitle")
+                    if isinstance(t, str) and t.strip():
+                        ai_title = t.strip()
+                    if events is not None:
+                        events.append("内部内容已排除：WorkBuddy ai-title")
+                    continue
+                if dtype != "message":
+                    if events is not None:
+                        if dtype in _WORKBUDDY_KNOWN_NON_MESSAGE_TYPES:
+                            events.append("内部内容已排除：WorkBuddy 已知非消息记录")
+                        else:
+                            events.append("未知 WorkBuddy 顶层记录类型")
+                    continue
+                raw_role = d.get("role")
+                role = raw_role.lower() if isinstance(raw_role, str) else ""
+                if role not in ("user", "assistant"):
+                    if events is not None:
+                        events.append("未知 WorkBuddy 消息角色")
+                    continue
+                content = d.get("content")
+                if isinstance(content, str):
+                    text = content.strip()
+                    content_handled = True
+                elif isinstance(content, list):
+                    parts: list[str] = []
+                    for block in content:
+                        if not isinstance(block, dict):
+                            if events is not None:
+                                events.append("未知 WorkBuddy 内容块类型")
+                            continue
+                        block_type = block.get("type")
+                        if block_type in _WORKBUDDY_KNOWN_CONTENT_BLOCK_TYPES:
+                            block_text = block.get("text")
+                            if isinstance(block_text, str):
+                                if block_text:
+                                    parts.append(block_text)
+                            elif block_text is not None:
+                                # 已知块结构漂移：非空、非字符串的 text 不能静默
+                                # 丢正文，按非预期结构告警处理。
+                                if events is not None:
+                                    events.append("结构损坏：WorkBuddy 内容块 text 不是字符串")
+                        elif block_type == "image":
+                            parts.append("[图片]")
+                        else:
+                            # 未知块：保留可验证文本（若有）并明确告警，绝不明
+                            # 失可见正文或把格式漂移当成功。
+                            block_text = block.get("text")
+                            if isinstance(block_text, str) and block_text:
+                                parts.append(block_text)
+                            if events is not None:
+                                events.append("未知 WorkBuddy 内容块类型")
+                    text = "\n".join(parts).strip()
+                    content_handled = True
+                else:
+                    if content is not None and events is not None:
+                        events.append(f"结构损坏 JSONL 行：WorkBuddy 第 {i} 行 content 结构无效")
+                    continue
+                if role == "user":
+                    text = _strip_workbuddy_internal(text)
+                if not text:
+                    if content is not None and not content_handled and events is not None:
+                        events.append("未知内部记录告警：WorkBuddy 未识别消息内容")
+                    elif events is not None:
+                        events.append("内部内容已排除：WorkBuddy 注入或无内容消息")
+                    continue
+                mid = (_safe_scalar(d.get("id"))
+                       or _occurrence_id(role, d.get("timestamp"), i, text))
+                msgs.append((role, fmt_time(d.get("timestamp")), mid, text))
+    except UnicodeDecodeError:
+        raise ImportError_("WorkBuddy JSONL UTF-8 解码失败")
+    if not msgs:
+        return None
+    if session_ids:
+        cid = next(iter(session_ids))
+    else:
+        role, _time, mid, text = msgs[0]
+        cid = "fp-session-" + hashlib.sha1(
+            f"{role}|{mid}|{_normalize_message_text(text)}".encode("utf-8")).hexdigest()[:16]
+    title = ai_title or _first_user_snippet(msgs) or path.stem
+    return [_make_conversation("workbuddy", cid, title, msgs)]
+
+
 # ---------- 写入：权限 0700/0600 + 原子写入 + 增量去重 ----------
 
 def _atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
@@ -2127,6 +2287,11 @@ def discover_local(since: Optional[str] = None, excludes: tuple = (), roots: tup
             rel = str(p.relative_to(root))
             if any(fnmatch.fnmatch(rel, ex) for ex in excludes):
                 continue
+            if source == "workbuddy" and "subagents" in p.parts:
+                # WorkBuddy 子代理会话是内部任务指令，不是用户对话，默认排除。
+                if failures is not None:
+                    failures.append(("—", "内部内容已排除：WorkBuddy 子代理会话"))
+                continue
             try:
                 size = p.stat().st_size
             except OSError:
@@ -2225,6 +2390,23 @@ def _peek(source: str, path: Path) -> tuple:
                     t = ""
                 if t and not re.match(r"^claude(?:\s+--?[\w-]+(?:\s+\S+)?)*\s*$", t):
                     title = t[:40] + ("…" if len(t) > 40 else "")
+        elif source == "workbuddy":
+            if d.get("type") == "ai-title" and not title:
+                t = d.get("aiTitle")
+                if isinstance(t, str) and t.strip():
+                    title = t.strip()[:40] + ("…" if len(t.strip()) > 40 else "")
+            elif d.get("type") == "message" and d.get("role") == "user" and not title:
+                content = d.get("content")
+                t = ""
+                if isinstance(content, str):
+                    t = content.strip()
+                elif isinstance(content, list):
+                    t = " ".join(c["text"] for c in content
+                                 if isinstance(c, dict) and c.get("type") == "input_text"
+                                 and isinstance(c.get("text"), str)).strip()
+                t = _strip_workbuddy_internal(t)
+                if t:
+                    title = t[:40] + ("…" if len(t) > 40 else "")
     return (first_t, last_t, title)
 
 
@@ -2296,7 +2478,7 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
     if not found:
         if not any(not _is_expected_exclusion(reason) for _ref, reason in discovery_failures):
             discovery_failures.append(("—", SKIP_EMPTY))
-        print("未发现可导入的本地会话（codex/claude）。")
+        print("未发现可导入的本地会话（codex/claude/workbuddy）。")
         return (0, 0, 0, 0, 0, discovery_failures)
     total_size = sum(f[5] for f in found)
     print(f"发现 {len(found)} 个本地会话，总大小 {total_size / 1024:.0f} KB：")
@@ -2324,8 +2506,12 @@ def run_local(found: list, args, imported: dict, out_dir: Path, discovery_failur
     for source, sid, title, first_t, last_t, size, path in found:
         events: list[str] = []
         try:
-            convs = (parse_codex(Path(path), events) if source == "codex"
-                     else parse_claude(Path(path), events))
+            if source == "codex":
+                convs = parse_codex(Path(path), events)
+            elif source == "claude":
+                convs = parse_claude(Path(path), events)
+            else:
+                convs = parse_workbuddy(Path(path), events)
         except ImportError_ as e:
             bad.append(("—", str(e)))
             continue
@@ -2412,11 +2598,16 @@ def _classify_local_file(path: Path, forced: str) -> str:
                     return "codex"
                 if dtype in ("user", "assistant", "mode") or "message" in record:
                     return "claude"
+                if (dtype == "message" and isinstance(record.get("role"), str)
+                        and "message" not in record and isinstance(record.get("content"), list)):
+                    return "workbuddy"
+                if dtype in ("message", "reasoning", "function_call", "function_call_result"):
+                    return "workbuddy"
     except UnicodeDecodeError:
         raise ImportError_("无法识别本地 JSONL：UTF-8 解码失败")
     except (OSError, json.JSONDecodeError):
         raise ImportError_("无法识别本地 JSONL：读取或 JSON 结构损坏")
-    raise ImportError_("无法自动识别本地 JSONL；请使用 --local-format codex 或 claude")
+    raise ImportError_("无法自动识别本地 JSONL；请使用 --local-format codex、claude 或 workbuddy")
 
 
 def discover_local_path(root: Path, since: Optional[str], excludes: tuple, forced: str) -> tuple[list, list]:
@@ -2436,6 +2627,14 @@ def discover_local_path(root: Path, since: Optional[str], excludes: tuple, force
             continue
         try:
             source = _classify_local_file(path, forced)
+        except ImportError_ as e:
+            failures.append(("—", str(e)))
+            continue
+        if source == "workbuddy" and "subagents" in path.parts:
+            # WorkBuddy 子代理会话是内部任务指令，不是用户对话，默认排除。
+            failures.append(("—", "内部内容已排除：WorkBuddy 子代理会话"))
+            continue
+        try:
             size = path.stat().st_size
             first_t, last_t, title = _peek(source, path)
             sid = _session_id(source, path)
@@ -2454,7 +2653,7 @@ def main() -> int:
     ap.add_argument("--path", help="导出来源目录/文件；local 可覆盖扫描根")
     ap.add_argument("--since", help="仅导入该日期（YYYY-MM-DD）之后的本地会话")
     ap.add_argument("--exclude", action="append", help="本地发现排除 glob（可重复）")
-    ap.add_argument("--local-format", choices=("auto", "codex", "claude"), default="auto",
+    ap.add_argument("--local-format", choices=("auto", "codex", "claude", "workbuddy"), default="auto",
                     help="local --path 的 JSONL 格式；默认按结构自动识别")
     ap.add_argument("--dry-run", action="store_true", help="只列清单/识别，不写文件")
     ap.add_argument("--yes", action="store_true", help="跳过确认直接导入")

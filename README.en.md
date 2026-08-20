@@ -91,7 +91,7 @@ python3 import_chats.py --source gemini   --path <Takeout dir>
 python3 import_chats.py --source deepseek --path <conversations.json or zip>
 python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--dry-run]
 # when local --path contains mixed JSONL files:
-python3 import_chats.py --source local --path <directory> --local-format auto|codex|claude --dry-run
+python3 import_chats.py --source local --path <directory> --local-format auto|codex|claude|workbuddy --dry-run
 ```
 
 The importer writes each Gemini `Prompted` activity separately. ChatGPT follows the active path when `current_node` is valid; it preserves and splits validated root-to-leaf branches only when the field is absent or `null`. A present malformed reference or reference to a missing node fails closed and is reported. DeepSeek branches are separate conversations rather than one invented merge. Images and authorized attachments become readable placeholders; model thinking, tool traces, and known local internal injections stay out of Markdown. `--dry-run` fully parses and reports planned new, updated, duplicate, and failed items without creating files. Exit code `0` means success (including expected internal exclusions), `2` partial success, and `1` fatal or all-failed input.
@@ -102,6 +102,7 @@ The importer writes each Gemini `Prompted` activity separately. ChatGPT follows 
 | Gemini web ⚗️ | Google Takeout → My Activity → **Gemini Apps** → Export; unzip to get `我的活动记录.html` | `--source gemini` (one conversation per Prompted activity; stops for unreliable activity containers) |
 | DeepSeek web | Avatar (bottom-left) → **System settings** → **Data management** → **Export all chat history** | `--source deepseek` |
 | Local Codex / Claude Code | Sessions live in `~/.codex/sessions`, `~/.claude/projects` | `--source local` (auto-discovery) |
+| Local WorkBuddy | Sessions live in `~/.workbuddy/projects/<workspace>/<sessionId>.jsonl`; subagent sessions (`subagents/`) are excluded automatically | `--source local --local-format workbuddy` (scans that dir by default without `--path`) |
 
 Full format details and the manual fallback live in [docs/intake.md](docs/intake.md).
 

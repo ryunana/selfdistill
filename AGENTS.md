@@ -8,7 +8,7 @@
 
 ## 流程
 
-1. **导入**：读 `docs/intake.md`。使用者会告诉你原始导出在本机的哪个目录/文件。运行 `python3 import_chats.py --source <来源> --path <原始导出路径>`（来源：`chatgpt` / `gemini` / `deepseek` / `local`），把导出整理成统一 Markdown 写入 `input/`。原始导出保留在仓库外本机目录，绝不提交到 Git。本地来源先 `--dry-run` 出清单、经使用者确认后再写。
+1. **导入**：读 `docs/intake.md`。使用者会告诉你原始导出在本机的哪个目录/文件。运行 `python3 import_chats.py --source <来源> --path <原始导出路径>`（来源：`chatgpt` / `gemini` / `deepseek` / `local`；WorkBuddy 本地会话用 `--source local --local-format workbuddy`），把导出整理成统一 Markdown 写入 `input/`。原始导出保留在仓库外本机目录，绝不提交到 Git。本地来源先 `--dry-run` 出清单、经使用者确认后再写。
 2. **提炼候选**：按 `prompts/distill.md` 从头读完 `input/` 全部材料，先报告阅读边界，再提出 L1–L4 候选，附来源证据。**只提候选，绝不直接改 `canonical/`、L4 或简历。**
 3. **逐条确认**：L3 和个人/敏感/高风险/冲突内容逐条请使用者确认；只有可见、可撤回的低风险通用规则可免逐条确认（记为 `policy_accepted_general`）。
 4. **写入**：使用者处理完候选、明确确认最终 aggregate diff 后，才增量写入 `canonical/`（结构参考 `templates/`，仓库里的「张三」是虚构样例）。

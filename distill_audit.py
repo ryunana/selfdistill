@@ -26,7 +26,7 @@ import tempfile
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -621,7 +621,7 @@ def _referenced_evidence_ids(report: Path) -> set[str]:
     return refs
 
 
-def verify_report(root: Path = PROJECT_ROOT, report: Path | None = None) -> dict[str, Any]:
+def verify_report(root: Path = PROJECT_ROOT, report: Optional[Path] = None) -> dict[str, Any]:
     """Fail closed if sources, evidence IDs, or generated references drift."""
 
     root = root.resolve()
@@ -668,7 +668,7 @@ def verify_report(root: Path = PROJECT_ROOT, report: Path | None = None) -> dict
     return {"files": len(expected), "evidence_ids": len(evidence_ids), "references": len(refs)}
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("audit", help="build reports/latest from canonical + inbox")
