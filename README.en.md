@@ -2,6 +2,8 @@
 
 English | [中文](README.md)
 
+![selfdistill bilingual project visual](docs/assets/selfdistill-hero.jpg)
+
 Distill your chat history with AI — with **AI assistance + human confirmation** — into a **visible, sourced, AI-usable** personal profile, then write it back to the AI tools you use so they keep knowing you.
 
 > Data stays on your machine by default; the "distillation" step calls a cloud AI, so anything you submit to the model is subject to that provider's data policy.

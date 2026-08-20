@@ -2,6 +2,8 @@
 
 [English](README.en.md) | 中文
 
+![selfdistill 双语项目主视觉](docs/assets/selfdistill-hero.jpg)
+
 把和 AI 的聊天记录，在 **AI 辅助 + 人工确认** 下，蒸馏成**看得见、带来源、AI 也用得上**的个人档案，并写回你常用的 AI 工具，让它持续认识你。
 
 > 数据默认留在本机；「蒸馏」这一步要调云端 AI，提交给模型的内容受该供应商数据政策约束。
