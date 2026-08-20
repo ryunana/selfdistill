@@ -97,7 +97,8 @@ class DistillAuditTests(unittest.TestCase):
 
     def test_cli_uses_copied_project_root_from_external_cwd(self) -> None:
         copied_root = Path(self.temp.name) / "copied-project"
-        shutil.copytree(FIXTURE_ROOT, copied_root)
+        copied_root.mkdir()
+        shutil.copytree(FIXTURE_ROOT, copied_root / "workspace")
         script = copied_root / "distill_audit.py"
         shutil.copy2(PROJECT_ROOT / "distill_audit.py", script)
         caller = Path(self.temp.name) / "external-caller"
@@ -113,7 +114,7 @@ class DistillAuditTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
         self.assertIn("audit: OK", result.stdout)
-        self.assertTrue((copied_root / "reports" / "latest").is_dir())
+        self.assertTrue((copied_root / "workspace" / "reports" / "latest").is_dir())
         self.assertFalse((caller / "reports").exists())
 
     def test_heading_ids_stay_stable_when_body_changes(self) -> None:

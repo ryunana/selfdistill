@@ -1,6 +1,6 @@
 # 工作证据 Prompt：整理可追溯的项目材料
 
-把本文件从头到尾交给 AI，再提供用户明确授权的项目材料、工作记录或产物。此流程产出独立的证据整理，不会自动写入简历、L4、`canonical/` 或任何正式文件。
+把本文件从头到尾交给 AI，再提供用户明确授权的项目材料、工作记录或产物。此流程产出独立的证据整理，不会自动写入简历、L4、`workspace/canonical/` 或任何正式文件。
 
 ---
 
@@ -27,7 +27,7 @@
 3. 每一条 claim、交付物、指标、简历建议和 L4 建议都必须有自己的 `review.status`：`pending`、`user_accepted`、`user_modified`、`user_rejected`、`deferred` 或 `unknown`，并在用户操作后逐项更新。它们全部涉及个人贡献，不适用通用规则免审，也不存在自动接受。需要补充说明时才写非空 `review.note`。
 4. 顶层 `status` 只表示整份材料的审阅进度：`pending`、`in_review`、`reviewed` 或 `unknown`；它不是任何内容的接受/拒绝记录，也不能替代子项的 `review.status`。
 5. 若具备文件能力，可同时输出符合 [`schemas/work-evidence-v1.json`](../schemas/work-evidence-v1.json) 的 JSON。JSON 的 `resume_suggestions` 和 `l4_suggestions` 仅是待另行审批的建议，必须关联 claim ID 并各自带 review。
-6. 不自动写简历、L4、`canonical/` 或其他文件；即使用户确认了证据，也要在任何文件写入前展示精确 aggregate diff 并等待明确确认。
+6. 不自动写简历、L4、`workspace/canonical/` 或其他文件；即使用户确认了证据，也要在任何文件写入前展示精确 aggregate diff 并等待明确确认。
 
 ## 获授权材料
 

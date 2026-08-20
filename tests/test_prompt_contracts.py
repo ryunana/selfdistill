@@ -125,7 +125,7 @@ class PromptContractTests(unittest.TestCase):
         ):
             self.assertIn(phrase, prompt)
         self.assertNotIn("输出按 selfdistill 的 canonical 结构", prompt)
-        self.assertIn("不是直接修改 `canonical/`", prompt)
+        self.assertIn("不是直接修改 `workspace/canonical/`", prompt)
 
     def test_work_evidence_prompt_forbids_fabrication_escalation_and_auto_write(self) -> None:
         prompt = read("prompts/work-evidence.md")
@@ -140,7 +140,7 @@ class PromptContractTests(unittest.TestCase):
             "验证状态",
             "用户自述指标绝不能标成 `verified`",
             "不得把参与写成负责、主导或决策所有者",
-            "不自动写简历、L4、`canonical/`",
+            "不自动写简历、L4、`workspace/canonical/`",
             "每一条 claim、交付物、指标、简历建议和 L4 建议",
             "project.name` 只是项目显示名称",
             "顶层 `status` 只表示整份材料的审阅进度",

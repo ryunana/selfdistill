@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""selfdistill build：读 canonical/ 生成 dist/（主页 + 内页，视觉层复用 showcase 模板）。
+"""selfdistill build：读本地工作区档案并生成 dist/。
 
 用法：
     python3 build.py               # 正常构建（私密 L3 默认排除）
     python3 build.py --include-private   # 额外包含 03-l3-private.md
+
+读取 workspace/canonical/；本地工作区尚未建立时，
+使用 examples/demo-profile/canonical/ 构建虚构 Demo。
 """
 import html
 import json
@@ -14,9 +17,29 @@ from pathlib import Path
 from typing import NoReturn, Optional
 
 ROOT = Path(__file__).resolve().parent
-CANON = ROOT / "canonical"
+WORKSPACE_CANON = ROOT / "workspace" / "canonical"
+DEMO_CANON = ROOT / "examples" / "demo-profile" / "canonical"
 DIST = ROOT / "dist"
 TEMPLATES = ROOT / "templates" / "showcase-html"
+
+
+def _contains_profile_data(path: Path) -> bool:
+    """Distinguish an empty tracked workspace placeholder from real profile data."""
+    if path.is_symlink() or not path.is_dir():
+        return False
+    if any(path.glob("*.md")):
+        return True
+    domains = path / "04-domain-playbooks"
+    return domains.is_dir() and any(domains.glob("*.md"))
+
+
+def _select_canonical_root() -> tuple[Path, str]:
+    if _contains_profile_data(WORKSPACE_CANON):
+        return WORKSPACE_CANON, "workspace"
+    return DEMO_CANON, "demo"
+
+
+CANON, SOURCE_MODE = _select_canonical_root()
 
 L1 = CANON / "01-l1-contract.md"
 L2 = CANON / "02-l2-decision-logic.md"
@@ -45,7 +68,8 @@ def require_directory(path: Path, label: str, missing_ok: bool = False) -> None:
 def read_md(path: Path) -> str:
     if not path.exists():
         fail(f"缺少文件 {path.relative_to(ROOT)}。"
-             f"请先在 canonical/ 下填好 L1–L4（可参考 templates/ 的空白模板）。")
+             f"请先在 workspace/canonical/ 下填好 L1–L4"
+             f"（可参考 templates/profile/ 的空白模板）。")
     if path.is_symlink() or not path.is_file():
         fail(f"输入文件无效或不允许是符号链接：{path.relative_to(ROOT)}")
     try:
@@ -368,8 +392,8 @@ I18N: dict[str, dict[str, str]] = {
                        "L1 behavior · L2 judgment · L3 facts · L4 methods — every item has a source, every item is confirmed by you."},
     "hero.simulated": {"zh": "以下内容为虚构示例，不代表真实个人身份。",
                        "en": "All content below is fictional sample data; it does not represent a real person."},
-    "hero.meta.canonical": {"zh": "📁 档案目录：<code>canonical/</code>",
-                            "en": "📁 Profile dir: <code>canonical/</code>"},
+    "hero.meta.canonical": {"zh": "📁 档案目录：<code>workspace/canonical/</code>",
+                            "en": "📁 Profile dir: <code>workspace/canonical/</code>"},
     "hero.meta.writeback": {"zh": "🔗 写回：Codex / Hermes / DSH",
                             "en": "🔗 Write-back: Codex / Hermes / DSH"},
     "hero.meta.l3": {"zh": "🔒 L3 含敏感块，默认不加载",
@@ -422,20 +446,21 @@ I18N: dict[str, dict[str, str]] = {
                       "en": "Maintenance loop — distillation isn't one-off"},
     "maintain.hint": {"zh": "手动更新 · 用户把关", "en": "Manual updates · user-gated"},
     "maintain.1.label": {"zh": "追加", "en": "Append"},
-    "maintain.1.hint": {"zh": "新对话整理成统一 Markdown，放进 input/",
-                        "en": "New chats normalized into unified Markdown, into input/"},
+    "maintain.1.hint": {"zh": "新对话整理成统一 Markdown，放进 workspace/input/",
+                        "en": "New chats normalized into unified Markdown, into workspace/input/"},
     "maintain.2.label": {"zh": "蒸馏", "en": "Distill"},
     "maintain.2.hint": {"zh": "重跑 prompts/distill.md 的蒸馏 prompt",
                         "en": "Re-run the prompts/distill.md distillation prompt"},
     "maintain.3.label": {"zh": "确认", "en": "Confirm"},
-    "maintain.3.hint": {"zh": "diff 逐条确认后进 canonical", "en": "Approve each diff line, then into canonical"},
+    "maintain.3.hint": {"zh": "diff 逐条确认后进 workspace/canonical/",
+                        "en": "Approve each diff line, then into workspace/canonical/"},
     "maintain.4.label": {"zh": "构建", "en": "Build"},
     "maintain.4.hint": {"zh": "python3 build.py + install.py 写回 AI 工具",
                         "en": "python3 build.py + install.py write back to AI tools"},
-    "footer.1": {"zh": "canonical/ · selfdistill 蒸馏我 — 让 AI 按使用者的思维方式配合",
-                 "en": "canonical/ · selfdistill — make AI work the way you think"},
-    "footer.template": {"zh": "canonical/ · selfdistill 蒸馏我 — 脱敏后的本地蒸馏示例",
-                        "en": "canonical/ · selfdistill — de-identified local distillation sample"},
+    "footer.1": {"zh": "workspace/canonical/ · selfdistill 蒸馏我 — 让 AI 按使用者的思维方式配合",
+                 "en": "workspace/canonical/ · selfdistill — make AI work the way you think"},
+    "footer.template": {"zh": "workspace/canonical/ · selfdistill 蒸馏我 — 脱敏后的本地蒸馏示例",
+                        "en": "workspace/canonical/ · selfdistill — de-identified local distillation sample"},
     "footer.2": {"zh": "L3 画像含 <code>[SENSITIVE]</code> 健康 / 财务 / 家庭细节，本页只展示结构与标签，不展示敏感原文；本页为示例数据",
                  "en": "L3 profile contains <code>[SENSITIVE]</code> health / finance / family details; this page shows structure "
                        "and labels only, never the sensitive text; sample data"},
@@ -461,7 +486,7 @@ def i18n_script(i18n_data: Optional[dict] = None) -> str:
         "window.I18N_DATA=" + data_json + ";"
         "var savedLang=null;try{savedLang=localStorage.getItem('viz-lang')}catch(e){}"
         "var currentLang=savedLang||((navigator.language||'').toLowerCase().indexOf('zh')===0?'zh':'en');"
-        "function i18nFill(s){return s.replace(/\{(\w+)\}/g,function(m,v){return (window.I18N_DATA&&window.I18N_DATA[v]!==undefined)?window.I18N_DATA[v]:m})}"
+        "function i18nFill(s){return s.replace(/\\{(\\w+)\\}/g,function(m,v){return (window.I18N_DATA&&window.I18N_DATA[v]!==undefined)?window.I18N_DATA[v]:m})}"
         "function applyLang(lang){"
         "var dict=window.I18N[lang]||window.I18N.zh;currentLang=lang;"
         "document.documentElement.lang=(lang==='zh'?'zh-CN':'en');"
@@ -535,11 +560,11 @@ EXAMPLE_EN = {
     2: ("[SIMULATED] ③ Judgment path", "[SIMULATED] L2 · Decision Logic", "[SIMULATED] Think it through first — confusion may mean the plan itself is unclear"),
     3: ("[SIMULATED] ④ Recall background", "[SIMULATED] L3 · Profile", "[SIMULATED] Load only relevant chunks, never touch sensitive info"),
     4: ("[SIMULATED] ⑤ Reporting style", "[SIMULATED] L1 · Contract", "[SIMULATED] Lead with conclusions, plain language, before/after change notes"),
-    5: ("[SIMULATED] ⑥ Closing the loop", "[SIMULATED] Distillation flow", "[SIMULATED] New preferences → confirmed, then into canonical; never auto-edited"),
+    5: ("[SIMULATED] ⑥ Closing the loop", "[SIMULATED] Distillation flow", "[SIMULATED] New preferences → confirmed, then into workspace/canonical/; never auto-edited"),
 }
 
 PRINCIPLES_EN = [
-    ("[SIMULATED] Layered architecture", "[SIMULATED] L1 behavior / L2 judgment / L3 facts / L4 domains, non-overlapping", "[SIMULATED] canonical/"),
+    ("[SIMULATED] Layered architecture", "[SIMULATED] L1 behavior / L2 judgment / L3 facts / L4 domains, non-overlapping", "[SIMULATED] workspace/canonical/"),
     ("[SIMULATED] L3 never commands", "[SIMULATED] Profile provides facts and defaults only, never behavior commands", "[SIMULATED] L1 · Priority"),
     ("[SIMULATED] User instruction wins", "[SIMULATED] Current explicit request &gt; historical profile; profile never locks the user in", "[SIMULATED] L1 · Hard rule"),
     ("[SIMULATED] Verify dynamic facts first", "[SIMULATED] Price / time / distance / availability: query first, never guess", "[SIMULATED] L1 · How to work"),
@@ -594,12 +619,12 @@ EXAMPLE_ROWS = [
     ("[SIMULATED] ③ 判断路径", "[SIMULATED] L2 · 决策逻辑", "[SIMULATED] 先想明白再动手 — 没听懂可能是方案本身没想清楚"),
     ("[SIMULATED] ④ 背景召回", "[SIMULATED] L3 · 用户画像", "[SIMULATED] 只加载相关块，不碰敏感信息"),
     ("[SIMULATED] ⑤ 汇报方式", "[SIMULATED] L1 · 协作契约", "[SIMULATED] 结论先行、说人话、改动说明 before/after"),
-    ("[SIMULATED] ⑥ 沉淀闭环", "[SIMULATED] 蒸馏流程", "[SIMULATED] 新偏好 → 确认后进 canonical，不自动改"),
+    ("[SIMULATED] ⑥ 沉淀闭环", "[SIMULATED] 蒸馏流程", "[SIMULATED] 新偏好 → 确认后进 workspace/canonical/，不自动改"),
 ]
 
 # 核心设计原则行（zh 默认，en 见 PRINCIPLES_EN；键 prin.row.{i}.{col}）
 PRINCIPLES = [
-    ("[SIMULATED] 分层架构", "[SIMULATED] L1 行为 / L2 判断 / L3 事实 / L4 领域，职责互不重叠", "[SIMULATED] canonical/"),
+    ("[SIMULATED] 分层架构", "[SIMULATED] L1 行为 / L2 判断 / L3 事实 / L4 领域，职责互不重叠", "[SIMULATED] workspace/canonical/"),
     ("[SIMULATED] L3 不发命令", "[SIMULATED] 用户画像只提供事实和默认偏好，不能发出行为命令", "[SIMULATED] L1 · 优先级"),
     ("[SIMULATED] 用户指令最高", "[SIMULATED] 当前明确要求 &gt; 历史画像；画像不锁定用户", "[SIMULATED] L1 · 硬规则"),
     ("[SIMULATED] 动态事实先查询", "[SIMULATED] 价格 / 时间 / 距离 / 开放状态先真实查询，严禁脑补", "[SIMULATED] L1 · 怎么配合"),
@@ -607,7 +632,7 @@ PRINCIPLES = [
     ("[SIMULATED] 弱信号不采集", "[SIMULATED] 回复变短 / 换话题不记录不归因——无法区分不满与忙碌", "[SIMULATED] L1 · 反馈信号"),
     ("[SIMULATED] 分块加载", "[SIMULATED] L3 按领域分块、L4 按任务加载，不整篇装入上下文", "[SIMULATED] 加载规则"),
     ("[SIMULATED] 可信度标记", "[SIMULATED] 每条带 as_of 时间戳 + confirmed / 待确认", "[SIMULATED] 元数据"),
-    ("[SIMULATED] 确认后才写入", "[SIMULATED] 候选经确认后才进 canonical，不自动改", "[SIMULATED] 蒸馏流程"),
+    ("[SIMULATED] 确认后才写入", "[SIMULATED] 候选经确认后才进 workspace/canonical/，不自动改", "[SIMULATED] 蒸馏流程"),
 ]
 
 # 由数据生成 i18n 键（layer.* / example.r* / prin.r*）
@@ -652,7 +677,7 @@ def build_home(domains: list, sizes: dict, assets: dict) -> str:
         'L1 管行为 · L2 管判断 · L3 管事实 · L4 管方法 — 每一条都有来源，每一条都要经你确认。</p>'
         '<p class="simulated-banner" data-i18n="hero.simulated">以下内容为虚构示例，不代表真实个人身份。</p>'
         '<div class="hero-meta">'
-        '<span data-i18n-html="hero.meta.canonical">📁 档案目录：<code>canonical/</code></span>'
+        '<span data-i18n-html="hero.meta.canonical">📁 档案目录：<code>workspace/canonical/</code></span>'
         '<span data-i18n="hero.meta.writeback">🔗 写回：Codex / Hermes / DSH</span>'
         '<span data-i18n="hero.meta.l3">🔒 L3 含敏感块，默认不加载</span>'
         '</div></header>'
@@ -789,16 +814,16 @@ def build_home(domains: list, sizes: dict, assets: dict) -> str:
         '<div class="section-head"><span class="num">6</span><h2 data-i18n="maintain.head">维护闭环 — 蒸馏不是一次性的</h2>'
         '<span class="hint" data-i18n="maintain.hint">手动更新 · 用户把关</span></div>'
         '<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">'
-        '<div class="kpi animate delay-1"><div class="num">①</div><div class="label" data-i18n="maintain.1.label">追加</div><div class="hint" data-i18n="maintain.1.hint">新对话整理成统一 Markdown，放进 input/</div></div>'
+        '<div class="kpi animate delay-1"><div class="num">①</div><div class="label" data-i18n="maintain.1.label">追加</div><div class="hint" data-i18n="maintain.1.hint">新对话整理成统一 Markdown，放进 workspace/input/</div></div>'
         '<div class="kpi animate delay-2"><div class="num">②</div><div class="label" data-i18n="maintain.2.label">蒸馏</div><div class="hint" data-i18n="maintain.2.hint">重跑 prompts/distill.md 的蒸馏 prompt</div></div>'
-        '<div class="kpi animate delay-3"><div class="num">③</div><div class="label" data-i18n="maintain.3.label">确认</div><div class="hint" data-i18n="maintain.3.hint">diff 逐条确认后进 canonical</div></div>'
+        '<div class="kpi animate delay-3"><div class="num">③</div><div class="label" data-i18n="maintain.3.label">确认</div><div class="hint" data-i18n="maintain.3.hint">diff 逐条确认后进 workspace/canonical/</div></div>'
         '<div class="kpi animate delay-4"><div class="num">④</div><div class="label" data-i18n="maintain.4.label">构建</div><div class="hint" data-i18n="maintain.4.hint">python3 build.py + install.py 写回 AI 工具</div></div>'
         '</div></section>'
     )
 
     footer = (
         '<footer>'
-        f'<p data-i18n="footer.1">canonical/ · selfdistill 蒸馏我 — 让 AI 按使用者的思维方式配合</p>'
+        f'<p data-i18n="footer.1">workspace/canonical/ · selfdistill 蒸馏我 — 让 AI 按使用者的思维方式配合</p>'
         f'<p style="margin-top:.5rem" data-i18n-html="footer.2">L3 画像含 <code>[SENSITIVE]</code> 健康 / 财务 / 家庭细节，本页只展示结构与标签，不展示敏感原文；本页为示例数据</p>'
         '</footer>'
     )
@@ -951,12 +976,16 @@ def main() -> int:
             fail("dist/ 已存在但不是普通目录，拒绝删除或覆盖。")
         shutil.rmtree(DIST)
 
-    require_directory(CANON, "canonical/ 目录")
+    canon_label = f"{CANON.relative_to(ROOT).as_posix()}/ 目录"
+    require_directory(CANON, canon_label)
     require_directory(ROOT / "templates", "templates/ 目录")
     require_directory(TEMPLATES, "showcase 模板目录")
     require_directory(L4_DIR, "L4 领域目录")
     if not any(L4_DIR.glob("*.md")):
         fail("L4 领域目录为空，请至少保留一个领域手册。")
+
+    if CANON == DEMO_CANON:
+        print("提示：workspace/canonical/ 尚无档案，正在使用虚构 Demo 构建。")
 
     l1 = read_md(L1)
     l2 = read_md(L2)
@@ -1005,6 +1034,18 @@ def main() -> int:
     }
 
     DIST.mkdir(parents=True, exist_ok=True)
+    (DIST / ".selfdistill-build.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_mode": SOURCE_MODE,
+                "source_path": CANON.relative_to(ROOT).as_posix(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
     (DIST / "index.html").write_text(build_home(domains, sizes, assets), encoding="utf-8")
     # 内页：复制 showcase 成品脱敏副本（手工编排的呈现效果，不自动生成）

@@ -22,6 +22,7 @@ WorkBuddy 目标（--target workbuddy）：
 """
 import argparse
 import difflib
+import json
 import os
 import re
 import sys
@@ -32,6 +33,7 @@ END = "<!-- distill:end -->"
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
+BUILD_MANIFEST = DIST / ".selfdistill-build.json"
 HOME = Path.home()
 
 # DSH 配置根：尊重 $DSH_HOME，缺省 ~/.dsh
@@ -52,6 +54,22 @@ SYSTEM_PROMPT_ID = "- id: system-prompt"
 
 class InstallError(Exception):
     """安装过程的可预期错误：主流程捕获后打印并退出非零。"""
+
+
+def require_installable_build() -> None:
+    """Only confirmed workspace profiles may be written into real AI tools."""
+
+    if BUILD_MANIFEST.is_symlink() or not BUILD_MANIFEST.is_file():
+        raise InstallError("构建来源标记缺失或无效；请先用当前版本重新运行 python3 build.py。")
+    try:
+        manifest = json.loads(BUILD_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise InstallError("构建来源标记损坏；请重新运行 python3 build.py。") from exc
+    if manifest.get("schema_version") != 1 or manifest.get("source_mode") not in {"workspace", "demo"}:
+        raise InstallError("构建来源标记格式无效；请重新运行 python3 build.py。")
+    if manifest["source_mode"] != "workspace":
+        raise InstallError("当前 dist/ 来自虚构 Demo，仅可预览，禁止写回。"
+                           "请先在 workspace/canonical/ 建立确认后的档案并重新构建。")
 
 
 def merge(existing: str, incoming: str) -> str:
@@ -233,6 +251,7 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
+        require_installable_build()
         plans = collect_plans(args.target)
     except InstallError as e:
         print(f"错误：{e}", file=sys.stderr)

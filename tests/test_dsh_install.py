@@ -145,6 +145,8 @@ class EndToEndTests(unittest.TestCase):
             repo = Path(tmp) / "repo"
             shutil.copytree(PROJECT_ROOT, repo,
                             ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+            shutil.copytree(repo / "examples" / "demo-profile" / "canonical",
+                            repo / "workspace" / "canonical", dirs_exist_ok=True)
             dsh_home = Path(tmp) / "dshhome"
             env = dict(os.environ, DSH_HOME=str(dsh_home))
             build = subprocess.run([sys.executable, "build.py"], cwd=str(repo),
@@ -155,9 +157,9 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             patch = (dsh_home / "cordis.patch.yml").read_text(encoding="utf-8")
             self.assertIn("- id: system-prompt", patch)
-            self.assertIn("# L1 协作契约", patch)
+            self.assertIn("# [SIMULATED] Demo 协作契约", patch)
             self.assertTrue((dsh_home / "skills" / "selfdistill-decision-logic" / "SKILL.md").exists())
-            self.assertTrue((dsh_home / "skills" / "selfdistill-agent-work" / "SKILL.md").exists())
+            self.assertTrue((dsh_home / "skills" / "selfdistill-demo-agent-review" / "SKILL.md").exists())
             self.assertTrue((dsh_home / "skills" / "selfdistill-user-profile" / "SKILL.md").exists())
             rerun = subprocess.run([sys.executable, "install.py", "--target", "dsh", "--yes"],
                                    cwd=str(repo), capture_output=True, text=True, env=env)

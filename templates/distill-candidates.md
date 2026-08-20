@@ -77,4 +77,4 @@
 
 ## 下一阶段：总 diff 确认
 
-仅在用户处理完候选后，生成对 `canonical/` 的最小、精确 aggregate diff。即使某项已被用户接受或为 `policy_accepted_general`，也不得写文件，直到用户明确确认该总 diff。
+仅在用户处理完候选后，生成对 `workspace/canonical/` 的最小、精确 aggregate diff。即使某项已被用户接受或为 `policy_accepted_general`，也不得写文件，直到用户明确确认该总 diff。

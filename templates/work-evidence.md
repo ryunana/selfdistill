@@ -63,4 +63,4 @@
 - 每个可审阅子项的 `review.status`：`pending` / `user_accepted` / `user_modified` / `user_rejected` / `deferred` / `unknown`。顶层 `status` 仅表示整份审阅进度，不能推断任何一项已接受。
 - `verified` claim 或指标至少要有第一方产物；`user_stated` 至少要有用户自述；`third_party_stated` 至少要有第三方评价。用户自述指标必须标为 `user_stated`，不能伪装为 `verified`。
 - 不补造数字、指标口径、时间窗口、基线、职责、主导/决策所有权、因果关系、结果或项目状态。
-- 不自动写简历、L4 或 `canonical/`；如要写入，先生成精确 aggregate diff 并取得明确确认。
+- 不自动写简历、L4 或 `workspace/canonical/`；如要写入，先生成精确 aggregate diff 并取得明确确认。
