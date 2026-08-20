@@ -862,6 +862,12 @@ DSH_L2_DESCRIPTION = ("用户 L2 决策逻辑：取舍原则、优先级与红�
 DSH_L3_DESCRIPTION = ("用户 L3 个人事实档案：身份、经历、偏好。"
                       "任务需要了解用户背景、身份或偏好时按需加载。")
 
+# WorkBuddy：description 说明加载时机，供 WorkBuddy 判断何时调用该 skill。
+WORKBUDDY_L2_DESCRIPTION = ("用户 L2 决策逻辑：取舍原则、优先级与红线（selfdistill 蒸馏档案）。"
+                            "任务涉及权衡、排序、风险判断或红线时加载本技能。")
+WORKBUDDY_L3_DESCRIPTION = ("用户 L3 个人事实档案：身份、经历、偏好（selfdistill 蒸馏档案）。"
+                            "任务需要了解用户背景、身份或偏好时加载本技能；私密内容不默认包含。")
+
 
 def dsh_skill_content(skill_name: str, description: str, text: str) -> str:
     """DSH skill 内容：frontmatter 必须在文件顶部，distill 标记在正文内作所有权标签。"""
@@ -911,6 +917,26 @@ def build_targets(l1: str, l2: str, l3: str, domains: list) -> None:
         skill_name = f"selfdistill-{fid}"
         (dsh / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
         (dsh / "skills" / skill_name / "SKILL.md").write_text(
+            dsh_skill_content(skill_name, desc, text), encoding="utf-8")
+
+    # WorkBuddy：L1 常驻进用户级记忆 MEMORY.md（每次会话注入，短且非敏感）；
+    # L2/L3/L4 写成 ~/.workbuddy/skills/ 下的 skill（按需加载，敏感内容不默认进上下文）。
+    # SKILL.md 用与 DSH 相同的 frontmatter（name + description）格式，WorkBuddy 原生兼容。
+    wb = DIST / "workbuddy"
+    wb.mkdir(parents=True, exist_ok=True)
+    (wb / "l1.md").write_text(wrap(l1), encoding="utf-8")
+    (wb / "skills").mkdir(parents=True, exist_ok=True)
+    for skill_name, description, text in [
+        ("selfdistill-decision-logic", WORKBUDDY_L2_DESCRIPTION, l2),
+        ("selfdistill-user-profile", WORKBUDDY_L3_DESCRIPTION, l3),
+    ]:
+        (wb / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
+        (wb / "skills" / skill_name / "SKILL.md").write_text(
+            dsh_skill_content(skill_name, description, text), encoding="utf-8")
+    for fid, text, desc in domains:
+        skill_name = f"selfdistill-{fid}"
+        (wb / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
+        (wb / "skills" / skill_name / "SKILL.md").write_text(
             dsh_skill_content(skill_name, desc, text), encoding="utf-8")
 
 
@@ -999,7 +1025,7 @@ def main() -> int:
         (DIST / f"{slug}-raw.html").write_text(build_raw(title, text, assets), encoding="utf-8")
 
     build_targets(l1, l2, l3, domains)
-    print(f"完成：dist/index.html + 内页/原始报告 + codex/ + hermes/ + dsh/（L4 领域 {len(domains)} 个）。")
+    print(f"完成：dist/index.html + 内页/原始报告 + codex/ + hermes/ + dsh/ + workbuddy/（L4 领域 {len(domains)} 个）。")
     return 0
 
 

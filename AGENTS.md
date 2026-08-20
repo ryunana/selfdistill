@@ -1,6 +1,6 @@
 # AGENTS.md — selfdistill 接手指令
 
-> 本文件面向**接手这个项目的 AI 助手**（Codex / Claude Code / Hermes / DeepSeek Harness 等）。你 clone 本项目后应自动读取本文件并照做，无需使用者再提供额外提示词。
+> 本文件面向**接手这个项目的 AI 助手**（Codex / Claude Code / Hermes / DeepSeek Harness / WorkBuddy 等）。你 clone 本项目后应自动读取本文件并照做，无需使用者再提供额外提示词。
 
 ## 你的任务
 
@@ -13,7 +13,7 @@
 3. **逐条确认**：L3 和个人/敏感/高风险/冲突内容逐条请使用者确认；只有可见、可撤回的低风险通用规则可免逐条确认（记为 `policy_accepted_general`）。
 4. **写入**：使用者处理完候选、明确确认最终 aggregate diff 后，才增量写入 `canonical/`（结构参考 `templates/`，仓库里的「张三」是虚构样例）。
 5. **构建**：运行 `python3 build.py` 生成 `dist/index.html`、L1–L4 报告与各写回产物。
-6. **写回（可选）**：使用者要写回时，运行 `python3 install.py --target codex|hermes|dsh`；先展示 diff，经使用者明确确认后再增量写入，不覆盖无关内容。
+6. **写回（可选）**：使用者要写回时，运行 `python3 install.py --target codex|hermes|dsh|workbuddy`；先展示 diff，经使用者明确确认后再增量写入，不覆盖无关内容。
 
 ## 硬规则
 
