@@ -3270,5 +3270,66 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("secret-local-filename", report)
 
 
+class WorkBuddyImportTests(unittest.TestCase):
+    def _session(self, td: Path) -> Path:
+        records = [
+            {"id": "seed-inject", "timestamp": 1787212277149, "type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": '<system-reminder data-role="user-context">\n<user_info>\nOS Version: darwin\n</user_info>\n<identity_context>\nidentity block\n</identity_context>\n<additional_data>\n<current_time>2026-08-20T00:00:00Z</current_time>\n</additional_data>\n</system-reminder>'}],
+             "sessionId": "wb-session-0001", "cwd": "/tmp"},
+            {"timestamp": 1787212279041, "type": "ai-title", "aiTitle": "让 selfdistill 支持 workbuddy",
+             "sessionId": "wb-session-0001", "cwd": "/tmp"},
+            {"id": "seed-think", "parentId": "seed-inject", "timestamp": 1787212280000, "type": "reasoning",
+             "content": [{"type": "thinking", "text": "内部思考过程"}], "sessionId": "wb-session-0001"},
+            {"id": "seed-asst", "parentId": "seed-think", "timestamp": 1787212281000, "type": "message",
+             "role": "assistant", "content": [{"type": "output_text", "text": "好的,我来分析。"}],
+             "sessionId": "wb-session-0001", "cwd": "/tmp"},
+            {"id": "seed-call", "parentId": "seed-asst", "timestamp": 1787212282000, "type": "function_call",
+             "callId": "call-1", "name": "WebFetch", "arguments": "{}", "sessionId": "wb-session-0001"},
+            {"id": "seed-result", "parentId": "seed-asst", "timestamp": 1787212283000, "type": "function_call_result",
+             "callId": "call-1", "status": "ok", "output": "{...}", "sessionId": "wb-session-0001"},
+            {"id": "seed-user", "parentId": "seed-result", "timestamp": 1787212284000, "type": "message",
+             "role": "user", "content": [{"type": "input_text", "text": "请继续"}],
+             "sessionId": "wb-session-0001", "cwd": "/tmp"},
+        ]
+        p = td / "wb-session-0001.jsonl"
+        p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+        return p
+
+    def test_parse_workbuddy_keeps_real_messages_and_title(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            events = []
+            convs = ic.parse_workbuddy(self._session(Path(td)), events)
+            self.assertIsNotNone(convs)
+            source, cid, title, _exported, msgs = convs[0]
+            self.assertEqual(source, "workbuddy")
+            self.assertEqual(cid, "wb-session-0001")
+            self.assertEqual(title, "让 selfdistill 支持 workbuddy")
+            self.assertEqual([m[2] for m in msgs], ["seed-asst", "seed-user"])
+            self.assertIn("好的,我来分析。", msgs[0][3])
+            self.assertIn("请继续", msgs[1][3])
+
+    def test_parse_workbuddy_excludes_injection_and_process_records(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            events = []
+            convs = ic.parse_workbuddy(self._session(Path(td)), events)
+            joined = "\n".join(m[3] for m in convs[0][4])
+            self.assertNotIn("system-reminder", joined)
+            self.assertNotIn("identity block", joined)
+            self.assertNotIn("内部思考过程", joined)
+            expected = [r for r in events if r.startswith("内部内容已排除")]
+            self.assertGreaterEqual(len(expected), 3)
+            self.assertNotIn("未知 WorkBuddy 顶层记录类型", events)
+
+    def test_workbuddy_classified_as_auto_and_claude_not_confused(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = self._session(Path(td))
+            self.assertEqual(ic._classify_local_file(p, "auto"), "workbuddy")
+        with tempfile.TemporaryDirectory() as td:
+            claude = Path(td) / "claude.jsonl"
+            claude.write_text(json.dumps({"type": "user", "uuid": "u1",
+                                          "message": {"role": "user", "content": "hi"}}), encoding="utf-8")
+            self.assertEqual(ic._classify_local_file(claude, "auto"), "claude")
+
+
 if __name__ == "__main__":
     unittest.main()
