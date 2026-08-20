@@ -2,7 +2,7 @@
 
 selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 AI 工具，先整理成同一种中性格式，AI 才能稳定地从中提炼 L1–L4。
 
-> **已有自动导入器**：把原始导出保留在仓库外的本机目录（不要放进 `input/`），运行 `python3 import_chats.py --source chatgpt|gemini|deepseek|local --path <导出>`；导入器会把 ChatGPT / Gemini / DeepSeek 导出与本地 Codex / Claude Code / WorkBuddy 会话整理成下面的统一 Markdown 写入 `input/`（本地来源先 dry-run 清单、确认后写入）。Gemini 按每次 `Prompted` 活动拆分；ChatGPT 在 `current_node` 有效时只保留活动路径，只有字段缺失或为 `null` 时才保留并拆分已验证的根到叶分支；字段存在但格式非法或所指节点不存在会拒绝并报告。DeepSeek 的分支会拆成独立会话。活动边界或本地 JSONL 来源无法可靠识别时，导入器会停止该输入而非猜测；本地混合目录可用 `--local-format auto|codex|claude|workbuddy` 指定。WorkBuddy 桌面版会话位于 `~/.workbuddy/projects/<工作区>/<sessionId>.jsonl`（每行一个扁平 JSON 事件，`type=message` 带 `role` 与 `input_text`/`output_text` 内容块；`reasoning`/`function_call` 等过程记录和会话开头的平台注入块自动排除）。本文档的整理说明保留为手工 fallback。
+> **已有自动导入器**：把原始导出保留在仓库外的本机目录（不要放进 `workspace/input/`），运行 `python3 import_chats.py --source chatgpt|gemini|deepseek|local --path <导出>`；导入器会把 ChatGPT / Gemini / DeepSeek 导出与本地 Codex / Claude Code / WorkBuddy 会话整理成下面的统一 Markdown 写入 `workspace/input/`（本地来源先 dry-run 清单、确认后写入）。Gemini 按每次 `Prompted` 活动拆分；ChatGPT 在 `current_node` 有效时只保留活动路径，只有字段缺失或为 `null` 时才保留并拆分已验证的根到叶分支；字段存在但格式非法或所指节点不存在会拒绝并报告。DeepSeek 的分支会拆成独立会话。活动边界或本地 JSONL 来源无法可靠识别时，导入器会停止该输入而非猜测；本地混合目录可用 `--local-format auto|codex|claude|workbuddy` 指定。WorkBuddy 桌面版会话位于 `~/.workbuddy/projects/<工作区>/<sessionId>.jsonl`（每行一个扁平 JSON 事件，`type=message` 带 `role` 与 `input_text`/`output_text` 内容块；`reasoning`/`function_call` 等过程记录和会话开头的平台注入块自动排除）。本文档的整理说明保留为手工 fallback。
 
 ## 格式约定
 
@@ -65,6 +65,6 @@ selfdistill 的蒸馏输入是「统一 Markdown」：不管聊天来自哪个 A
 
 ### 本机 Codex / Claude Code
 
-这些来源的记录保存在本机目录，可以把整理工作交给正在使用的 AI 工具协助：把记录交给 AI，让它按上面的统一格式整理成 Markdown。原始记录留在仓库外的本机目录；`input/` 只放统一 Markdown。自动导入只排除可确认的系统环境、命令、元数据和任务通知；普通用户写的 XML、代码或提及这些标记的文字会保留。
+这些来源的记录保存在本机目录，可以把整理工作交给正在使用的 AI 工具协助：把记录交给 AI，让它按上面的统一格式整理成 Markdown。原始记录留在仓库外的本机目录；`workspace/input/` 只放统一 Markdown。自动导入只排除可确认的系统环境、命令、元数据和任务通知；普通用户写的 XML、代码或提及这些标记的文字会保留。
 
-整理完成后，把文件放进 `input/` 目录（该目录已被 `.gitignore` 忽略，不会提交到仓库）。这是手工/半手工整理格式，不代表仓库会自动导入、调用模型或读取任何平台账户。首次处理时，把统一 Markdown、现有 `canonical/` 和所需授权附件交给 AI，并使用 `prompts/distill.md`；它应先报告完整阅读边界，再提出候选，不直接写正式档案。
+整理完成后，把文件放进 `workspace/input/` 目录（该目录已被 `.gitignore` 忽略，不会提交到仓库）。这是手工/半手工整理格式，不代表仓库会自动导入、调用模型或读取任何平台账户。首次处理时，把统一 Markdown、现有 `workspace/canonical/` 和所需授权附件交给 AI，并使用 `prompts/distill.md`；它应先报告完整阅读边界，再提出候选，不直接写正式档案。

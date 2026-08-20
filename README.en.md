@@ -16,6 +16,7 @@ Distill your chat history with AI — with **AI assistance + human confirmation*
 
 - [What Is This](#what-is-this)
 - [Data Flow](#data-flow)
+- [Repository Structure](#repository-structure)
 - [Quick Start](#quick-start)
 - [First Distillation: Build L1–L4 from Full History](#first-distillation-build-l1l4-from-full-history)
 - [Import Sources](#import-sources)
@@ -43,10 +44,22 @@ Two outputs: ① a local multi-page HTML visualization; ② incremental write-ba
 ## Data Flow
 
 ```text
-Export chat history → Normalize into unified Markdown → AI distills L1–L4 candidates → Confirm each item with the user → Write to canonical/ → Build HTML / write back to AI tools
+Export chat history → Normalize into unified Markdown → AI distills L1–L4 candidates → Confirm each item with the user → Write to workspace/canonical/ → Build HTML / write back to AI tools
 ```
 
 "Human confirmation" is a hard rule throughout: **nothing is written to the canonical profile without confirmation, and write-back always shows a diff first.**
+
+## Repository Structure
+
+| Directory | Purpose |
+|-----------|---------|
+| [`workspace/`](workspace/) | Your local workspace: confirmed profile, imported chats, candidates, and audit reports; real content is git-ignored |
+| [`examples/demo-profile/`](examples/demo-profile/) | The public fictional “Zhang San” demo, used for previews and empty-workspace builds |
+| [`templates/profile/`](templates/profile/) | Blank L1–L4 starter templates |
+| [`prompts/`](prompts/) / [`schemas/`](schemas/) | AI distillation rules and machine-readable contracts |
+| [`docs/`](docs/) | Import and continuous-update guides; early development records are archived separately |
+| [`dsh/`](dsh/) / [`workbuddy/`](workbuddy/) | Platform integration packages; root paths remain stable for existing install links |
+| [`tests/`](tests/) | Automated regression tests |
 
 ## Quick Start
 
@@ -69,7 +82,7 @@ You only need to do two things: **① export your chat history → ② send the 
 
 ### What the AI assistant does (automatic, no effort from you)
 
-After cloning the project, the AI assistant auto-reads the root `AGENTS.md` handoff instructions and follows them: import → propose candidates → confirm item by item → write `canonical/` → build → write back. See `AGENTS.md` and `prompts/distill.md` for the full flow.
+After cloning the project, the AI assistant auto-reads the root `AGENTS.md` handoff instructions and follows them: import → propose candidates → confirm item by item → write `workspace/canonical/` → build → write back. See `AGENTS.md` and `prompts/distill.md` for the full flow.
 
 Manual step-by-step instructions (without an AI assistant) are in the sections below.
 
@@ -111,9 +124,11 @@ Full format details and the manual fallback live in [docs/intake.md](docs/intake
 ### ① HTML visualization
 
 ```bash
-python3 build.py          # generates dist/
+python3 build.py          # reads workspace/ when populated; otherwise builds the fictional demo
 open dist/index.html      # L1–L4 architecture, content distribution, principles, collaboration flow (中 / EN switchable)
 ```
+
+If the build reports that it is using the fictional demo, `dist/` is preview-only and `install.py` refuses write-back. Create your confirmed profile under `workspace/canonical/`, then rebuild.
 
 ### ② Write back to AI tools (so AI keeps knowing you)
 
@@ -170,21 +185,21 @@ dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
 After the first distillation, you do not need to start over each time:
 
 - **A new batch of chats**: import it with `import_chats.py`, then use `prompts/distill.md` to extract new candidates;
-- **A few day-to-day corrections**: use the lighter audit flow built around `inbox/`, `distill_audit.py`, and `prompts/rediscovery.md`.
+- **A few day-to-day corrections**: use the lighter audit flow built around `workspace/inbox/`, `distill_audit.py`, and `prompts/rediscovery.md`.
 
-See the [continuous-update guide](docs/continuous-update.en.md) for the full steps and boundaries. Either way, review the candidates and explicitly confirm the final aggregate diff before anything is written to `canonical/`.
+See the [continuous-update guide](docs/continuous-update.en.md) for the full steps and boundaries. Either way, review the candidates and explicitly confirm the final aggregate diff before anything is written to `workspace/canonical/`.
 
 ## Work Evidence: Organize Project Facts, Don't Auto-Package Outcomes
 
 Hand the user-authorized project materials to [`prompts/work-evidence.md`](prompts/work-evidence.md). It separates project background, goals, responsibilities, actions, deliverables, results, metrics, sources, and evidence gaps, and strictly distinguishes participated, responsible, led, and decision-ownership. Metrics must keep their statistical basis, time window, baseline, and source; leave gaps empty rather than fabricating numbers, causality, responsibilities, or project status.
 
-Work evidence is an independent, optional review material: every personal contribution needs per-item confirmation, there are no general rules that skip review, and nothing auto-enters a resume, L4, or `canonical/`. [`templates/work-evidence.md`](templates/work-evidence.md) is for human review; [`schemas/work-evidence-v1.json`](schemas/work-evidence-v1.json) is for future automation; ordinary users need no hand-written JSON. If files are ever written later, still show and explicitly confirm the aggregate diff first.
+Work evidence is an independent, optional review material: every personal contribution needs per-item confirmation, there are no general rules that skip review, and nothing auto-enters a resume, L4, or `workspace/canonical/`. [`templates/work-evidence.md`](templates/work-evidence.md) is for human review; [`schemas/work-evidence-v1.json`](schemas/work-evidence-v1.json) is for future automation; ordinary users need no hand-written JSON. If files are ever written later, still show and explicitly confirm the aggregate diff first.
 
 ## Privacy & Security
 
-- `input/`, `inbox/`, `reports/`, and `dist/` are local data or build artifacts, git-ignored by default; the repo keeps only the inbox README and `input/.gitkeep`. **Never commit real chats, candidates, or reports to a public repository.**
+- `workspace/canonical/`, `workspace/input/`, `workspace/inbox/`, `workspace/reports/`, and `dist/` are local data or build artifacts, git-ignored by default; the repo keeps only directory instructions and placeholders. **Never commit real profiles, chats, candidates, or reports to a public repository.**
 - Data stays local by default; if you hand `evidence.md` to a cloud AI, that provider's data policy applies.
-- Private L3 (`canonical/03-l3-private.md`) is not built or written back by default; use `python3 build.py --include-private` when needed.
+- Private L3 (`workspace/canonical/03-l3-private.md`) is not built or written back by default; use `python3 build.py --include-private` when needed.
 - Every write-back shows a diff and requires confirmation; re-installs merge incrementally and refuse to overwrite files not managed by selfdistill.
 
 ## Dependencies

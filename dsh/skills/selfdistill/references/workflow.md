@@ -6,23 +6,25 @@
 
 ```text
 selfdistill/
-├── build.py                  # 读 canonical/ 生成 dist/（HTML + codex + hermes + dsh）
+├── build.py                  # 读 workspace/canonical/ 生成 dist/（HTML + codex + hermes + dsh）
 ├── install.py                # 写回 AI 工具（--target codex|hermes|dsh）
 ├── distill_audit.py          # 持续蒸馏审计（audit / verify）
-├── canonical/                # 正式档案（L1–L4），只放用户确认过的内容
-│   ├── 01-l1-contract.md
-│   ├── 02-l2-decision-logic.md
-│   ├── 03-l3-user-profile.md
-│   ├── 03-l3-private.md      # 私密 L3，Git 忽略，默认不构建
-│   └── 04-domain-playbooks/<领域>.md
-├── templates/                # 档案空白模板
+├── workspace/                # 使用者本地数据（Git 忽略）
+│   ├── canonical/            # 正式档案（L1–L4），只放确认过的内容
+│   │   ├── 01-l1-contract.md
+│   │   ├── 02-l2-decision-logic.md
+│   │   ├── 03-l3-user-profile.md
+│   │   ├── 03-l3-private.md  # 私密 L3，Git 忽略，默认不构建
+│   │   └── 04-domain-playbooks/<领域>.md
+│   ├── input/                # 统一聊天（Git 忽略）
+│   ├── inbox/                # 待确认候选（Git 忽略）
+│   └── reports/              # 审计产物（Git 忽略）
+├── examples/demo-profile/    # 公开虚构 Demo
+├── templates/profile/        # 档案空白模板
 ├── docs/intake.md            # 各来源导出整理说明
 ├── prompts/distill.md        # 蒸馏规则（L1–L4 提炼）
 ├── prompts/rediscovery.md    # 持续重新发现规则
-├── schemas/inbox-v2.json     # inbox 候选契约
-├── input/                    # 原始聊天（Git 忽略）
-├── inbox/                    # 待确认候选（Git 忽略）
-└── reports/                  # 审计产物（Git 忽略）
+└── schemas/inbox-v2.json     # inbox 候选契约
 ```
 
 ## L4 领域文件格式
@@ -69,4 +71,4 @@ install.py --target dsh 安装到 $DSH_HOME（默认 ~/.dsh）：
 persona 在 system-prompt 行（home patch 重启后生效）；skills 在 ~/.dsh/skills/（skill-filesystem 自动发现，新会话可见）。若改了插件包本身需重启 web。
 
 **Q：用户没有导出文件，只有聊天里的只言片语？**
-按 schemas/inbox-v2.json 把明确修正/边界补充记成 inbox 候选，走持续更新流程，而不是直接改 canonical。
+按 schemas/inbox-v2.json 把明确修正/边界补充记成 inbox 候选，走持续更新流程，而不是直接改 workspace/canonical/。

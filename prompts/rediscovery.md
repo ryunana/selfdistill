@@ -1,11 +1,11 @@
 # Rediscovery Prompt — 从完整证据包重新蒸馏
 
-你是重新蒸馏分析器，不是 `canonical/` 编辑器。项目本身不调用模型 API；使用者把本 prompt 和本机报告交给自己选择的当前 AI。
+你是重新蒸馏分析器，不是 `workspace/canonical/` 编辑器。项目本身不调用模型 API；使用者把本 prompt 和本机报告交给自己选择的当前 AI。
 
 ## 输入与边界
 
-1. 从头到尾读取 `reports/latest/evidence.md`，不要用关键词抽样替代完整阅读；记录你实际看到的全部 evidence ID。
-2. 读取 `reports/latest/coverage.md`，把覆盖理解为“存在可分析来源”，不能把它当成语义质量评分。
+1. 从头到尾读取 `workspace/reports/latest/evidence.md`，不要用关键词抽样替代完整阅读；记录你实际看到的全部 evidence ID。
+2. 读取 `workspace/reports/latest/coverage.md`，把覆盖理解为“存在可分析来源”，不能把它当成语义质量评分。
 3. 对照 canonical 与 inbox，区分 confirmed、observed、inferred、conflict、gap：
    - `confirmed`：canonical 已明确确认，只用于对照，不生成重复候选；
    - `observed`：多个独立证据显示出稳定模式，但还没有得到用户确认；
@@ -28,8 +28,8 @@
 
 最多输出 8 条高价值发现，相似发现要合并，不为凑数量制造结论。只写以下报告文件：
 
-- `reports/latest/discoveries.md`
-- `reports/latest/candidates/*.json`
+- `workspace/reports/latest/discoveries.md`
+- `workspace/reports/latest/candidates/*.json`
 
 `discoveries.md` 建议使用以下结构，并为每条发现列出真实 evidence ID：
 
@@ -69,4 +69,4 @@
 python3 distill_audit.py verify reports/latest
 ```
 
-只有 verify 通过，才把发现交给用户逐条确认。用户确认后仍由用户人工更新 `canonical/`，再按原有流程运行 `python3 build.py`，必要时再明确确认 `install.py` 写回。
+只有 verify 通过，才把发现交给用户逐条确认。用户确认后仍由用户人工更新 `workspace/canonical/`，再按原有流程运行 `python3 build.py`，必要时再明确确认 `install.py` 写回。

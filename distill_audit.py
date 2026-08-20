@@ -2,8 +2,9 @@
 """Build and verify a local continuous-distillation evidence package.
 
 The command deliberately does no semantic analysis and never edits canonical
-or inbox inputs.  It only reads ``canonical/**/*.md`` and ``inbox/*.json``
-and writes a complete report under ``reports/latest/``.
+or inbox inputs.  It reads ``workspace/canonical/**/*.md`` and
+``workspace/inbox/*.json``
+and writes a complete report under ``workspace/reports/latest/``.
 
 Usage::
 
@@ -30,6 +31,7 @@ from typing import Any, Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
 EVIDENCE_RE = re.compile(r"^ev-[0-9a-f]{16}$")
 EVIDENCE_TOKEN_RE = re.compile(r"\bev-[0-9a-f]{16}\b")
 ANY_EVIDENCE_TOKEN_RE = re.compile(r"\bev-[A-Za-z0-9_-]+\b")
@@ -474,8 +476,8 @@ def _remove_existing_directory(path: Path) -> None:
         path.unlink()
 
 
-def audit_project(root: Path = PROJECT_ROOT) -> Path:
-    """Build reports/latest atomically and return its path."""
+def audit_project(root: Path = WORKSPACE_ROOT) -> Path:
+    """Build reports/latest under the supplied root and return its path."""
 
     root = root.resolve()
     inventory, evidence = build_audit(root)
@@ -621,7 +623,7 @@ def _referenced_evidence_ids(report: Path) -> set[str]:
     return refs
 
 
-def verify_report(root: Path = PROJECT_ROOT, report: Optional[Path] = None) -> dict[str, Any]:
+def verify_report(root: Path = WORKSPACE_ROOT, report: Optional[Path] = None) -> dict[str, Any]:
     """Fail closed if sources, evidence IDs, or generated references drift."""
 
     root = root.resolve()
@@ -671,13 +673,14 @@ def verify_report(root: Path = PROJECT_ROOT, report: Optional[Path] = None) -> d
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("audit", help="build reports/latest from canonical + inbox")
+    subparsers.add_parser("audit", help="build workspace/reports/latest from workspace canonical + inbox")
     verify_parser = subparsers.add_parser("verify", help="fail-closed verification of a report")
     verify_parser.add_argument("report", nargs="?", default="reports/latest")
     args = parser.parse_args(argv)
     try:
+        workspace_root = WORKSPACE_ROOT
         if args.command == "audit":
-            report = audit_project(PROJECT_ROOT)
+            report = audit_project(workspace_root)
             inventory = json.loads((report / "inventory.json").read_text(encoding="utf-8"))
             summary = inventory["summary"]
             print(
@@ -688,8 +691,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         else:
             report_arg = Path(args.report)
-            report = report_arg if report_arg.is_absolute() else PROJECT_ROOT / report_arg
-            result = verify_report(PROJECT_ROOT, report)
+            # 兼容用户按仓库相对路径显式传入 workspace/reports/latest；
+            # 内部审计根已经是 workspace/，需要先去掉重复前缀。
+            if report_arg.parts[:1] == ("workspace",):
+                report_arg = Path(*report_arg.parts[1:])
+            report = report_arg if report_arg.is_absolute() else workspace_root / report_arg
+            result = verify_report(workspace_root, report)
             print(f"verify: OK files={result['files']} evidence={result['evidence_ids']} refs={result['references']}")
         return 0
     except (AuditError, OSError, UnicodeError, json.JSONDecodeError) as exc:

@@ -16,6 +16,7 @@
 
 - [这是什么](#这是什么)
 - [数据流](#数据流)
+- [仓库结构](#仓库结构)
 - [快速开始](#快速开始)
 - [首次蒸馏：从完整历史建立 L1–L4](#首次蒸馏从完整历史建立-l1l4)
 - [导入来源](#导入来源)
@@ -43,10 +44,22 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude
 ## 数据流
 
 ```text
-导出聊天记录 → 整理成统一 Markdown → AI 提炼 L1–L4 候选 → 逐条人工确认 → 写入 canonical/ → 构建 HTML / 写回 AI 工具
+导出聊天记录 → 整理成统一 Markdown → AI 提炼 L1–L4 候选 → 逐条人工确认 → 写入 workspace/canonical/ → 构建 HTML / 写回 AI 工具
 ```
 
 全程「人工确认」是硬规则：**未经确认，不写入正式档案；写回前先展示 diff。**
+
+## 仓库结构
+
+| 目录 | 放什么 |
+|------|--------|
+| [`workspace/`](workspace/) | 你的本地工作区：正式档案、导入记录、候选和审计报告；真实内容默认不提交 |
+| [`examples/demo-profile/`](examples/demo-profile/) | 公开的「张三」虚构 Demo，只用于预览和空工作区构建 |
+| [`templates/profile/`](templates/profile/) | 新建 L1–L4 时使用的空白模板 |
+| [`prompts/`](prompts/) / [`schemas/`](schemas/) | AI 蒸馏规则与机器可读契约 |
+| [`docs/`](docs/) | 导入与持续更新说明；早期开发材料单独归档 |
+| [`dsh/`](dsh/) / [`workbuddy/`](workbuddy/) | 平台集成包；为兼容已有安装链接，继续保留根目录路径 |
+| [`tests/`](tests/) | 自动化回归测试 |
 
 ## 快速开始
 
@@ -69,7 +82,7 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude
 
 ### AI 助手会做什么（自动，无需你操心）
 
-AI 助手 clone 项目后会自动读取根目录的 `AGENTS.md` 接手指令，按「导入 → 提炼候选 → 逐条确认 → 写 canonical/ → 构建 → 写回」执行。完整流程见 `AGENTS.md` 和 `prompts/distill.md`。
+AI 助手 clone 项目后会自动读取根目录的 `AGENTS.md` 接手指令，按「导入 → 提炼候选 → 逐条确认 → 写 workspace/canonical/ → 构建 → 写回」执行。完整流程见 `AGENTS.md` 和 `prompts/distill.md`。
 
 手动完成每个步骤的说明（不依赖 AI 助手）见下方各节。
 
@@ -111,9 +124,11 @@ python3 import_chats.py --source local --path <目录> --local-format auto|codex
 ### ① HTML 可视化
 
 ```bash
-python3 build.py          # 生成 dist/
+python3 build.py          # 有本地档案时读取 workspace/；否则构建虚构 Demo
 open dist/index.html      # L1–L4 分层架构、内容分布、设计原则、协同流程（支持中 / EN 切换）
 ```
+
+若构建时提示正在使用虚构 Demo，`dist/` 仅用于预览，`install.py` 会拒绝写回；先在 `workspace/canonical/` 建立自己的确认后档案，再重新构建。
 
 ### ② 写回 AI 工具（让 AI 持续认识你）
 
@@ -170,21 +185,21 @@ dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
 首次蒸馏完成后，不需要每次从头开始：
 
 - **有一批新对话**：继续用 `import_chats.py` 导入，再按 `prompts/distill.md` 提炼新增候选；
-- **只有少量日常修正**：使用 `inbox/`、`distill_audit.py` 和 `prompts/rediscovery.md` 走轻量审计流程。
+- **只有少量日常修正**：使用 `workspace/inbox/`、`distill_audit.py` 和 `prompts/rediscovery.md` 走轻量审计流程。
 
-详细步骤和边界见 [持续更新指南](docs/continuous-update.md)。无论走哪条路径，正式写入 `canonical/` 前都要审阅候选，并明确确认最终 aggregate diff。
+详细步骤和边界见 [持续更新指南](docs/continuous-update.md)。无论走哪条路径，正式写入 `workspace/canonical/` 前都要审阅候选，并明确确认最终 aggregate diff。
 
 ## 工作证据：整理项目事实，不自动包装成果
 
 把用户授权的项目材料交给 [`prompts/work-evidence.md`](prompts/work-evidence.md)。它会将项目背景、目标、职责、行动、交付物、结果、指标、来源和待补证分开，并严格区分参与、负责、主导与决策所有权。指标必须保留统计口径、时间窗口、基线和来源；缺失就留空，不补造数字、因果关系、职责或项目状态。
 
-工作证据是独立、可选的审阅材料：所有个人贡献均需逐条确认，不存在通用规则免审，也不会自动写入简历、L4 或 `canonical/`。[`templates/work-evidence.md`](templates/work-evidence.md) 供人工审阅；[`schemas/work-evidence-v1.json`](schemas/work-evidence-v1.json) 供将来自动化读取，普通使用者无需手写 JSON。若日后确实要写文件，仍先展示并明确确认 aggregate diff。
+工作证据是独立、可选的审阅材料：所有个人贡献均需逐条确认，不存在通用规则免审，也不会自动写入简历、L4 或 `workspace/canonical/`。[`templates/work-evidence.md`](templates/work-evidence.md) 供人工审阅；[`schemas/work-evidence-v1.json`](schemas/work-evidence-v1.json) 供将来自动化读取，普通使用者无需手写 JSON。若日后确实要写文件，仍先展示并明确确认 aggregate diff。
 
 ## 隐私与安全
 
-- `input/`、`inbox/`、`reports/`、`dist/` 都是本机数据或生成物，默认被 Git 忽略；仓库只保留 inbox 说明和 `input/.gitkeep`。**不要把真实聊天、候选或报告提交到公开仓库。**
+- `workspace/canonical/`、`workspace/input/`、`workspace/inbox/`、`workspace/reports/`、`dist/` 都是本机数据或生成物，默认被 Git 忽略；仓库只保留目录说明和占位文件。**不要把真实档案、聊天、候选或报告提交到公开仓库。**
 - 数据默认留在本机；若把 `evidence.md` 等交给云端 AI，仍须遵守该模型供应商的数据政策。
-- 私密 L3（`canonical/03-l3-private.md`）默认不构建、不写回；需要时用 `python3 build.py --include-private`。
+- 私密 L3（`workspace/canonical/03-l3-private.md`）默认不构建、不写回；需要时用 `python3 build.py --include-private`。
 - 所有写回都先展示 diff、人工确认后执行；重复安装增量合并，目标文件非 selfdistill 管理时拒绝覆盖。
 
 ## 依赖

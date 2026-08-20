@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selfdistill chat importer：把各来源聊天记录自动整理成统一 Markdown 写入 input/。
+"""selfdistill chat importer：把各来源聊天记录整理到 workspace/input/。
 
 用法：
     python3 import_chats.py --source chatgpt  --path <导出目录或文件>
@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 ROOT = Path(__file__).resolve().parent
-INPUT_DIR = ROOT / "input"
+INPUT_DIR = ROOT / "workspace" / "input"
 IMPORTED_FILE = INPUT_DIR / ".imported.json"
 
 SOURCES = ("chatgpt", "gemini", "deepseek", "local")
@@ -2659,7 +2659,7 @@ def main() -> int:
     ap.add_argument("--yes", action="store_true", help="跳过确认直接导入")
     ap.add_argument("--include-thinking", action="store_true",
                     help="DeepSeek 包含 THINK 推理片段（默认排除）")
-    ap.add_argument("--root", help="覆盖 input/ 根目录（测试用）")
+    ap.add_argument("--root", help="覆盖 workspace/input/ 根目录（测试用）")
     args = ap.parse_args()
 
     global _INCLUDE_THINKING

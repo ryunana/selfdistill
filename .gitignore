@@ -2,15 +2,15 @@
 dist/
 
 # 持续蒸馏本地报告（可能含敏感证据，不提交）
-reports/
+workspace/reports/
 
-# 使用者的原始聊天（隐私，绝不提交）
-input/*
-!input/.gitkeep
-
-# 使用者的持续蒸馏候选（只保留说明文件）
-inbox/*
-!inbox/README.md
+# 使用者本地工作区（真实档案、聊天与候选绝不提交）
+workspace/canonical/*
+!workspace/canonical/.gitkeep
+workspace/input/*
+!workspace/input/.gitkeep
+workspace/inbox/*
+!workspace/inbox/README.md
 
 # Python
 __pycache__/
@@ -20,6 +20,3 @@ __pycache__/
 
 # 系统
 .DS_Store
-
-# 本地真实敏感 L3（不提交）
-canonical/03-l3-private.md

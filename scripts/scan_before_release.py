@@ -3,7 +3,7 @@
 
 纯标准库，无依赖。用法：
     python3 scripts/scan_before_release.py [路径]
-默认扫描仓库根目录（自动跳过 .git / dist / input / 虚拟环境）。
+默认扫描仓库根目录（自动跳过 .git / dist / workspace 本地数据 / 虚拟环境）。
 """
 from __future__ import annotations
 
@@ -39,8 +39,12 @@ SKIP_DIRS = {
 TEXT_SUFFIXES = {".md", ".py", ".txt", ".json", ".yaml", ".yml", ".toml",
                  ".html", ".css", ".js", ".sh", ".csv"}
 
-PROTECTED_DIRS = {"input", "inbox", "reports", "dist"}
-ALLOWED_TRACKED = {"input/.gitkeep", "inbox/README.md"}
+PROTECTED_DIRS = {"canonical", "input", "inbox", "reports", "dist"}
+ALLOWED_TRACKED = {
+    "workspace/canonical/.gitkeep",
+    "workspace/input/.gitkeep",
+    "workspace/inbox/README.md",
+}
 
 
 def tracked_files(root: Path) -> list[str] | None:
@@ -67,7 +71,11 @@ def check_protected_tracked_paths(root: Path) -> int:
     hits = 0
     for relative in paths:
         parts = Path(relative).parts
-        if not parts or parts[0] not in PROTECTED_DIRS:
+        protected = bool(parts and parts[0] in PROTECTED_DIRS)
+        if len(parts) >= 2 and parts[0] == "workspace" \
+                and parts[1] in {"canonical", "input", "inbox", "reports"}:
+            protected = True
+        if not protected:
             continue
         if relative in ALLOWED_TRACKED:
             continue
@@ -85,7 +93,12 @@ def _skip_content_path(path: Path, root: Path) -> bool:
     parts = relative.parts
     if any(part in SKIP_DIRS for part in parts):
         return True
-    if parts and parts[0] == "inbox" and relative.as_posix() != "inbox/README.md":
+    if len(parts) >= 2 and parts[0] == "workspace" and parts[1] in {"canonical", "input", "reports"}:
+        return True
+    if len(parts) >= 2 and parts[0] == "workspace" and parts[1] == "inbox" \
+            and relative.as_posix() != "workspace/inbox/README.md":
+        return True
+    if parts and parts[0] in {"canonical", "inbox"}:
         return True
     return False
 
