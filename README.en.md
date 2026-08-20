@@ -18,6 +18,7 @@ Distill your chat history with AI — with **AI assistance + human confirmation*
 - [First Distillation: Build L1–L4 from Full History](#first-distillation-build-l1l4-from-full-history)
 - [Import Sources](#import-sources)
 - [Outputs & Write-back Targets](#outputs--write-back-targets)
+- [Keep Your Profile Up to Date](#keep-your-profile-up-to-date)
 - [Work Evidence: Organize Project Facts, Don't Auto-Package Outcomes](#work-evidence-organize-project-facts-dont-auto-package-outcomes)
 - [Privacy & Security](#privacy--security)
 - [Dependencies](#dependencies)
@@ -141,6 +142,15 @@ dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
 
 - The plugin is a zero-dependency bundle (`selfdistill-dsh`); after install, a `selfdistill` skill appears in the agent's skill catalog;
 - Once published to npm: `dsh plugin --profile web add selfdistill-dsh`.
+
+## Keep Your Profile Up to Date
+
+After the first distillation, you do not need to start over each time:
+
+- **A new batch of chats**: import it with `import_chats.py`, then use `prompts/distill.md` to extract new candidates;
+- **A few day-to-day corrections**: use the lighter audit flow built around `inbox/`, `distill_audit.py`, and `prompts/rediscovery.md`.
+
+See the [continuous-update guide](docs/continuous-update.en.md) for the full steps and boundaries. Either way, review the candidates and explicitly confirm the final aggregate diff before anything is written to `canonical/`.
 
 ## Work Evidence: Organize Project Facts, Don't Auto-Package Outcomes
 

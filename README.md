@@ -18,6 +18,7 @@
 - [首次蒸馏：从完整历史建立 L1–L4](#首次蒸馏从完整历史建立-l1l4)
 - [导入来源](#导入来源)
 - [产出与写回目标](#产出与写回目标)
+- [持续更新自己的档案](#持续更新自己的档案)
 - [工作证据：整理项目事实，不自动包装成果](#工作证据整理项目事实不自动包装成果)
 - [隐私与安全](#隐私与安全)
 - [依赖](#依赖)
@@ -141,6 +142,15 @@ dsh plugin --profile web add "github:ryunana/selfdistill#main&path:/dsh"
 
 - 插件包为零依赖 bundle（`selfdistill-dsh`），安装后 agent 的 skill 目录里出现 `selfdistill`；
 - 发布到 npm 后可直接 `dsh plugin --profile web add selfdistill-dsh`。
+
+## 持续更新自己的档案
+
+首次蒸馏完成后，不需要每次从头开始：
+
+- **有一批新对话**：继续用 `import_chats.py` 导入，再按 `prompts/distill.md` 提炼新增候选；
+- **只有少量日常修正**：使用 `inbox/`、`distill_audit.py` 和 `prompts/rediscovery.md` 走轻量审计流程。
+
+详细步骤和边界见 [持续更新指南](docs/continuous-update.md)。无论走哪条路径，正式写入 `canonical/` 前都要审阅候选，并明确确认最终 aggregate diff。
 
 ## 工作证据：整理项目事实，不自动包装成果
 
