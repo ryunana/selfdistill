@@ -91,7 +91,7 @@ python3 import_chats.py --source gemini   --path <Takeout 解压目录>
 python3 import_chats.py --source deepseek --path <conversations.json 或 zip>
 python3 import_chats.py --source local [--since YYYY-MM-DD] [--exclude glob] [--dry-run]
 # local --path 指向混合 JSONL 目录时：
-python3 import_chats.py --source local --path <目录> --local-format auto|codex|claude --dry-run
+python3 import_chats.py --source local --path <目录> --local-format auto|codex|claude|workbuddy --dry-run
 ```
 
 导入器会把 Gemini 的每次 `Prompted` 活动单独输出；ChatGPT 在 `current_node` 有效时只保留活动路径，只有字段缺失或为 `null` 时才会保留并拆分已验证的根到叶分支；字段存在但格式非法或所指节点不存在会拒绝并报告。DeepSeek 的分支会拆成独立会话，而不是拼成假对话。图片和授权附件只保留可读占位，模型思考、工具过程与已知本机内部注入不会进入 Markdown。`--dry-run` 会完整解析并显示预计新导入、更新、重复和失败数，但不会创建文件。退出码 `0` 表示成功（含预期内部内容排除），`2` 表示部分成功，`1` 表示全部失败或致命错误。

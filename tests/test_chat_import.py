@@ -3417,6 +3417,78 @@ class WorkBuddyImportTests(unittest.TestCase):
             self.assertEqual(len(found), 1)
             self.assertTrue(found[0][6].endswith("new.jsonl"))
 
+    def test_workbuddy_envelope_plus_user_query(self) -> None:
+        # 真实格式：平台前置 envelope + <user_query> 用户正文 → 只保留正文。
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "env-query.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text":
+                              '<system-reminder data-role="user-context">\n<user_info>\nOS: darwin\n</user_info>\n</system-reminder>\n<user_query>这是我的真实问题</user_query>'}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_workbuddy(p, [])
+            user_text = convs[0][4][0][3]
+            self.assertEqual(user_text, "这是我的真实问题")
+            self.assertNotIn("system-reminder", user_text)
+            self.assertNotIn("user_query", user_text)
+            self.assertNotIn("darwin", user_text)
+
+    def test_workbuddy_envelope_plus_plain_text(self) -> None:
+        # 前置 envelope + 普通正文（无 user_query 包裹）→ 保留正文。
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "env-plain.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text":
+                              '<system-reminder data-role="user-context">\n<additional_data>\n<current_time>x</current_time>\n</additional_data>\n</system-reminder>\n直接说正文'}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_workbuddy(p, [])
+            self.assertEqual(convs[0][4][0][3], "直接说正文")
+
+    def test_workbuddy_user_written_full_tag_preserved(self) -> None:
+        # 用户自写的完整 <system-reminder> 标签（无 data-role="user-context"）原样保留。
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "user-tag.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text":
+                              "请解释 <system-reminder>示例</system-reminder> 的含义"}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            convs = ic.parse_workbuddy(p, [])
+            self.assertEqual(convs[0][4][0][3], "请解释 <system-reminder>示例</system-reminder> 的含义")
+
+    def test_workbuddy_known_block_non_string_text_warns(self) -> None:
+        # 已知块 text 非空非字符串 → 非预期结构告警（不能归入内部排除）。
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "drift.jsonl"
+            records = [
+                {"id": "m1", "timestamp": 1787212284000, "type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": {"nested": "visible"}}],
+                 "sessionId": "s1"},
+                {"id": "m2", "timestamp": 1787212285000, "type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "回复"}], "sessionId": "s1"},
+            ]
+            p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+            events = []
+            convs = ic.parse_workbuddy(p, events)
+            self.assertIsNotNone(convs)
+            # 非预期结构告警（不以"内部内容已排除"开头 → 会被报告层当失败，
+            # 使 dry-run / 退出码暴露 schema drift）
+            self.assertIn("结构损坏：WorkBuddy 内容块 text 不是字符串", events)
+            self.assertTrue(any(not r.startswith("内部内容已排除") for r in events))
+
 
 if __name__ == "__main__":
     unittest.main()

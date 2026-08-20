@@ -1432,20 +1432,28 @@ _WORKBUDDY_KNOWN_NON_MESSAGE_TYPES = {
     "file-history-snapshot", "ai-title",
 }
 _WORKBUDDY_KNOWN_CONTENT_BLOCK_TYPES = {"input_text", "output_text"}
-# WorkBuddy 每次会话开头会把平台注入的上下文整块塞进第一条 user 消息
-# （<system-reminder> 包裹 user_info / identity_context / additional_data /
-# memory_and_skills_reminder 等），与 ChatGPT/Claude 的注入同样不入档案。
-# 只剥离"整条消息就是一个 system-reminder envelope"的情况；用户自己编写或
-# 引用的 <user_info> 等标签必须原样保留。
-_WORKBUDDY_INJECTION_ENVELOPE = re.compile(
-    r"^\s*<system-reminder\b[^>]*>.*</system-reminder>\s*$", re.I | re.S)
+# WorkBuddy 每条 user 消息可能带平台前置注入：一个带 data-role="user-context"
+# 的 <system-reminder> envelope（内含 user_info / identity_context /
+# additional_data / memory_and_skills_reminder 等），随后是 <user_query> 包裹的
+# 用户正文。只剥离带该平台特征的前置 envelope；用户自写的 <system-reminder>/
+# <user_info> 等标签没有这个属性，必须原样保留。
+_WORKBUDDY_PLATFORM_ENVELOPE = re.compile(
+    r"^\s*<system-reminder\b[^>]*data-role=[\"']user-context[\"'][^>]*>.*?</system-reminder>\s*",
+    re.I | re.S)
+_WORKBUDDY_USER_QUERY = re.compile(
+    r"^\s*<user_query>\s*(.*?)\s*</user_query>\s*$", re.I | re.S)
 
 
 def _strip_workbuddy_internal(text: str) -> str:
-    """剥离 WorkBuddy 平台注入 envelope；非 envelope 文本原样保留。"""
-    if _WORKBUDDY_INJECTION_ENVELOPE.match(text):
-        return ""
-    return text
+    """剥离 WorkBuddy 平台前置注入 envelope；非平台文本原样保留。"""
+    m = _WORKBUDDY_PLATFORM_ENVELOPE.match(text)
+    if not m:
+        return text
+    rest = text[m.end():].strip()
+    q = _WORKBUDDY_USER_QUERY.match(rest)
+    if q:
+        return q.group(1).strip()
+    return rest
 
 
 def parse_workbuddy(path: Path, events: Optional[list[str]] = None) -> Optional[list]:
@@ -1518,8 +1526,14 @@ def parse_workbuddy(path: Path, events: Optional[list[str]] = None) -> Optional[
                         block_type = block.get("type")
                         if block_type in _WORKBUDDY_KNOWN_CONTENT_BLOCK_TYPES:
                             block_text = block.get("text")
-                            if isinstance(block_text, str) and block_text:
-                                parts.append(block_text)
+                            if isinstance(block_text, str):
+                                if block_text:
+                                    parts.append(block_text)
+                            elif block_text is not None:
+                                # 已知块结构漂移：非空、非字符串的 text 不能静默
+                                # 丢正文，按非预期结构告警处理。
+                                if events is not None:
+                                    events.append("结构损坏：WorkBuddy 内容块 text 不是字符串")
                         elif block_type == "image":
                             parts.append("[图片]")
                         else:
