@@ -40,6 +40,7 @@ SOURCES = ("chatgpt", "gemini", "deepseek", "local")
 LOCAL_ROOTS = (
     ("codex", "~/.codex/sessions", "rollout-*.jsonl"),
     ("claude", "~/.claude/projects", "*.jsonl"),
+    ("workbuddy", "~/.workbuddy/projects", "*.jsonl"),
 )
 
 SKIP_EMPTY = "无消息"
@@ -74,8 +75,12 @@ def fmt_time(value) -> Optional[str]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         # bool is an int subclass; malformed exports with create_time: true
         # must not render as 1970-01-01.
+        # 13 位毫秒时间戳（WorkBuddy 等本地来源）先换算成秒再格式化。
+        epoch = value
+        if epoch > 10 ** 12:
+            epoch = epoch / 1000.0
         try:
-            return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M")
         except (OSError, ValueError, OverflowError):
             return None
     s = str(value).strip()
@@ -1430,14 +1435,17 @@ _WORKBUDDY_KNOWN_CONTENT_BLOCK_TYPES = {"input_text", "output_text"}
 # WorkBuddy 每次会话开头会把平台注入的上下文整块塞进第一条 user 消息
 # （<system-reminder> 包裹 user_info / identity_context / additional_data /
 # memory_and_skills_reminder 等），与 ChatGPT/Claude 的注入同样不入档案。
-_WORKBUDDY_INTERNAL_BLOCK = re.compile(
-    r"\s*<(system-reminder|user_info|identity_context|additional_data|"
-    r"memory_and_skills_reminder|product_identity)\b[^>]*>.*?</\1>", re.I | re.S)
+# 只剥离"整条消息就是一个 system-reminder envelope"的情况；用户自己编写或
+# 引用的 <user_info> 等标签必须原样保留。
+_WORKBUDDY_INJECTION_ENVELOPE = re.compile(
+    r"^\s*<system-reminder\b[^>]*>.*</system-reminder>\s*$", re.I | re.S)
 
 
 def _strip_workbuddy_internal(text: str) -> str:
-    """剥离 WorkBuddy 平台注入块，剩余空白说明这条 user 消息不是真实输入。"""
-    return _WORKBUDDY_INTERNAL_BLOCK.sub("", text).strip()
+    """剥离 WorkBuddy 平台注入 envelope；非 envelope 文本原样保留。"""
+    if _WORKBUDDY_INJECTION_ENVELOPE.match(text):
+        return ""
+    return text
 
 
 def parse_workbuddy(path: Path, events: Optional[list[str]] = None) -> Optional[list]:
@@ -1514,8 +1522,14 @@ def parse_workbuddy(path: Path, events: Optional[list[str]] = None) -> Optional[
                                 parts.append(block_text)
                         elif block_type == "image":
                             parts.append("[图片]")
-                        elif events is not None:
-                            events.append(f"内部内容已排除：WorkBuddy {block_type} 内容块")
+                        else:
+                            # 未知块：保留可验证文本（若有）并明确告警，绝不明
+                            # 失可见正文或把格式漂移当成功。
+                            block_text = block.get("text")
+                            if isinstance(block_text, str) and block_text:
+                                parts.append(block_text)
+                            if events is not None:
+                                events.append("未知 WorkBuddy 内容块类型")
                     text = "\n".join(parts).strip()
                     content_handled = True
                 else:
@@ -2259,6 +2273,11 @@ def discover_local(since: Optional[str] = None, excludes: tuple = (), roots: tup
             rel = str(p.relative_to(root))
             if any(fnmatch.fnmatch(rel, ex) for ex in excludes):
                 continue
+            if source == "workbuddy" and "subagents" in p.parts:
+                # WorkBuddy 子代理会话是内部任务指令，不是用户对话，默认排除。
+                if failures is not None:
+                    failures.append(("—", "内部内容已排除：WorkBuddy 子代理会话"))
+                continue
             try:
                 size = p.stat().st_size
             except OSError:
@@ -2594,6 +2613,14 @@ def discover_local_path(root: Path, since: Optional[str], excludes: tuple, force
             continue
         try:
             source = _classify_local_file(path, forced)
+        except ImportError_ as e:
+            failures.append(("—", str(e)))
+            continue
+        if source == "workbuddy" and "subagents" in path.parts:
+            # WorkBuddy 子代理会话是内部任务指令，不是用户对话，默认排除。
+            failures.append(("—", "内部内容已排除：WorkBuddy 子代理会话"))
+            continue
+        try:
             size = path.stat().st_size
             first_t, last_t, title = _peek(source, path)
             sid = _session_id(source, path)

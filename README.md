@@ -102,7 +102,7 @@ python3 import_chats.py --source local --path <目录> --local-format auto|codex
 | Gemini 网页 ⚗️ | Google Takeout → 我的活动 → **Gemini Apps** → 导出；解压后得到 `我的活动记录.html` | `--source gemini`（每个 Prompted 活动一份会话；活动容器不可靠时停止并改用手工整理） |
 | DeepSeek 网页 | 左下角头像 → **系统设置** → **数据管理** → **导出所有历史对话** | `--source deepseek` |
 | 本机 Codex / Claude Code | 会话保存在 `~/.codex/sessions`、`~/.claude/projects` | `--source local`（自动发现） |
-| 本机 WorkBuddy | 会话保存在 `~/.workbuddy/projects/<工作区>/<sessionId>.jsonl` | `--source local --local-format workbuddy`（或 auto 自动识别） |
+| 本机 WorkBuddy | 会话保存在 `~/.workbuddy/projects/<工作区>/<sessionId>.jsonl`；子代理会话（`subagents/`）自动排除 | `--source local --local-format workbuddy`（不传 `--path` 时默认扫描该目录） |
 
 详细格式与手工整理 fallback 见 [docs/intake.md](docs/intake.md)。
 

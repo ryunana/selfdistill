@@ -102,7 +102,7 @@ The importer writes each Gemini `Prompted` activity separately. ChatGPT follows 
 | Gemini web ⚗️ | Google Takeout → My Activity → **Gemini Apps** → Export; unzip to get `我的活动记录.html` | `--source gemini` (one conversation per Prompted activity; stops for unreliable activity containers) |
 | DeepSeek web | Avatar (bottom-left) → **System settings** → **Data management** → **Export all chat history** | `--source deepseek` |
 | Local Codex / Claude Code | Sessions live in `~/.codex/sessions`, `~/.claude/projects` | `--source local` (auto-discovery) |
-| Local WorkBuddy | Sessions live in `~/.workbuddy/projects/<workspace>/<sessionId>.jsonl` | `--source local --local-format workbuddy` (or `auto` sniffing) |
+| Local WorkBuddy | Sessions live in `~/.workbuddy/projects/<workspace>/<sessionId>.jsonl`; subagent sessions (`subagents/`) are excluded automatically | `--source local --local-format workbuddy` (scans that dir by default without `--path`) |
 
 Full format details and the manual fallback live in [docs/intake.md](docs/intake.md).
 

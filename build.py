@@ -11,7 +11,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 ROOT = Path(__file__).resolve().parent
 CANON = ROOT / "canonical"
@@ -345,7 +345,7 @@ def hide_simulated_markers(markup: str) -> str:
     return markup.replace('[SIMULATED]', '<span class="simulated-marker" aria-label="虚构示例">[SIMULATED]</span>')
 
 
-def page(title: str, body: str, css: str, js: str, i18n_data: dict | None = None) -> str:
+def page(title: str, body: str, css: str, js: str, i18n_data: Optional[dict] = None) -> str:
     body = hide_simulated_markers(body)
     return (f'<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="UTF-8">\n'
             f'<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
@@ -447,7 +447,7 @@ I18N: dict[str, dict[str, str]] = {
 }
 
 
-def i18n_script(i18n_data: dict | None = None) -> str:
+def i18n_script(i18n_data: Optional[dict] = None) -> str:
     """生成页面底部的中/EN 切换脚本（字典 + 数据 + applyLang/cycleLang）。"""
     data_json = json.dumps(i18n_data or {}, ensure_ascii=False)
     # JS 侧按语言索引：I18N[lang][key]
@@ -476,7 +476,7 @@ def i18n_script(i18n_data: dict | None = None) -> str:
     )
 
 
-def inject_i18n_template(markup: str, i18n_data: dict | None = None) -> str:
+def inject_i18n_template(markup: str, i18n_data: Optional[dict] = None) -> str:
     """给静态模板（l1-l4.html）注入语言切换按钮与 i18n 脚本；模板文案自带 data-i18n 属性。"""
     button = '<button onclick="cycleLang()"><span>🌐</span><span id="langLabel">EN</span></button>'
     if '<button onclick="window.print()">' in markup:
