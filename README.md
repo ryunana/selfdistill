@@ -28,7 +28,7 @@
 
 ## 这是什么
 
-selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude / Codex / Gemini 等工具里的历史对话，提炼成 L1–L4 分级信息，并写回 AI 工具（Codex / Hermes / DeepSeek Harness / WorkBuddy）：
+selfdistill 是一个「AI 自我蒸馏」工具包：把你在 ChatGPT / Claude / Codex / Gemini 等工具里的历史对话，提炼成 L1–L4 分级信息，并写回 AI 工具（Codex / Claude Code / Hermes / DeepSeek Harness / WorkBuddy）：
 
 | 层级 | 内容 | 通俗解释 | 在 AI 工具里的加载方式 |
 |------|------|----------|------------------------|
@@ -138,6 +138,7 @@ open dist/index.html      # L1–L4 分层架构、内容分布、设计原则�
 | Hermes | `~/.hermes/skills/` | `python3 install.py --target hermes` | Hermes skill 机制，按需加载 |
 | DeepSeek Harness | `$DSH_HOME`（默认 `~/.dsh`） | `python3 install.py --target dsh` | persona 常驻 L1，L2/L3/L4 为 skill 按需加载 |
 | WorkBuddy | `~/.workbuddy`（MEMORY.md + skills/） | `python3 install.py --target workbuddy` | L1 合并进 MEMORY.md 每次会话常驻，L2/L3/L4 为 skill 按需加载 |
+| Claude Code | `~/.claude`（CLAUDE.md + skills/） | `python3 install.py --target claude` | L1 合并进 CLAUDE.md 每次会话常驻，L2/L3/L4 为 skill 按需加载 |
 
 每次写回都**先展示 diff，确认后才写入**；重复安装增量合并，不覆盖无关内容。
 

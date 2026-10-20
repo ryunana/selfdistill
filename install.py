@@ -6,6 +6,7 @@
     python3 install.py --target hermes    # 装到 ~/.hermes
     python3 install.py --target dsh       # 装到 $DSH_HOME（默认 ~/.dsh）
     python3 install.py --target workbuddy # 装到 ~/.workbuddy
+    python3 install.py --target claude    # 装到 ~/.claude
     python3 install.py --target codex --yes   # 跳过确认直接写（慎用）
 
 只做三件事：目标文件不存在则新建；存在则替换 distill 标记块之间的内容；无标记则追加一个标记块。
@@ -14,6 +15,11 @@ DSH 目标（--target dsh）：
 - persona（L1 协作契约）合并进 $DSH_HOME/cordis.patch.yml 的 system-prompt.persona；
 - L2/L3/L4 写成 $DSH_HOME/skills/<name>/SKILL.md（frontmatter 在顶部，按需加载）；
 - 目标 skill 文件已存在但无 distill 标记（非 selfdistill 管理）时拒绝覆盖。
+
+Claude Code 目标（--target claude）：
+- L1 协作契约合并进 ~/.claude/CLAUDE.md（用户级记忆，每次会话常驻注入）；
+- L2/L3/L4 写成 ~/.claude/skills/<name>/SKILL.md（按需加载）；
+- CLAUDE.md 若已有你的其他内容，只追加 distill 标记块，不覆盖；skill 文件无 distill 标记时拒绝覆盖。
 
 WorkBuddy 目标（--target workbuddy）：
 - L1 协作契约合并进 ~/.workbuddy/MEMORY.md（用户级记忆，每次会话常驻注入；短且非敏感）；
@@ -41,6 +47,9 @@ DSH_HOME = Path(os.environ["DSH_HOME"]) if os.environ.get("DSH_HOME") else HOME 
 
 # WorkBuddy 配置根（用户级）：skills 目录 ~/.workbuddy/skills/，记忆文件 ~/.workbuddy/MEMORY.md
 WORKBUDDY_HOME = HOME / ".workbuddy"
+
+# Claude Code 配置根（用户级）：记忆文件 ~/.claude/CLAUDE.md，skills 目录 ~/.claude/skills/
+CLAUDE_HOME = HOME / ".claude"
 
 # DSH web profile 默认 persona 开场白（来自 dsh-web-app bundle patch，实测 rc.7）。
 # 若你的 DSH 已自定义 persona，可用 SELFDISTILL_DSH_PERSONA_OPENER 覆盖本常量。
@@ -214,6 +223,9 @@ def collect_plans(target: str) -> list:
         elif target == "workbuddy":
             target_root = WORKBUDDY_HOME
             dest = WORKBUDDY_HOME / "MEMORY.md" if rel.as_posix() == "l1.md" else WORKBUDDY_HOME / rel
+        elif target == "claude":
+            target_root = CLAUDE_HOME
+            dest = CLAUDE_HOME / "CLAUDE.md" if rel.as_posix() == "CLAUDE.md" else CLAUDE_HOME / rel
         else:
             target_root = HOME / f".{target}"
             dest = target_root / rel
@@ -236,7 +248,10 @@ def collect_plans(target: str) -> list:
         elif target == "workbuddy" and rel.as_posix() == "l1.md":
             # MEMORY.md 是普通 Markdown（非 YAML patch）：用标准 distill 标记块合并
             new_content = merge(existing, incoming)
-        elif target in ("dsh", "workbuddy"):
+        elif target == "claude" and rel.as_posix() == "CLAUDE.md":
+            # CLAUDE.md 可能已有用户自己的其他内容：只追加/替换 distill 标记块
+            new_content = merge(existing, incoming)
+        elif target in ("dsh", "workbuddy", "claude"):
             new_content = merge_skill(existing, incoming)
         else:
             new_content = merge(existing, incoming)
@@ -246,7 +261,8 @@ def collect_plans(target: str) -> list:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", required=True, choices=["codex", "hermes", "dsh", "workbuddy"])
+    ap.add_argument("--target", required=True,
+                    choices=["codex", "hermes", "dsh", "workbuddy", "claude"])
     ap.add_argument("--yes", action="store_true", help="跳过确认，直接写入")
     args = ap.parse_args()
 

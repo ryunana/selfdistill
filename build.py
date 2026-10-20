@@ -964,6 +964,26 @@ def build_targets(l1: str, l2: str, l3: str, domains: list) -> None:
         (wb / "skills" / skill_name / "SKILL.md").write_text(
             dsh_skill_content(skill_name, desc, text), encoding="utf-8")
 
+    # Claude Code：L1 常驻进用户级记忆 ~/.claude/CLAUDE.md（每次会话注入）；
+    # L2/L3/L4 写成 ~/.claude/skills/ 下的 skill（按需加载，敏感内容不默认进上下文）。
+    cc = DIST / "claude"
+    cc.mkdir(parents=True, exist_ok=True)
+    (cc / "CLAUDE.md").write_text(wrap(l1), encoding="utf-8")
+    (cc / "skills").mkdir(parents=True, exist_ok=True)
+    for skill_name, description, text in [
+        ("selfdistill-decision-logic", DSH_L2_DESCRIPTION, l2),
+        ("selfdistill-user-profile", DSH_L3_DESCRIPTION, l3),
+    ]:
+        (cc / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
+        (cc / "skills" / skill_name / "SKILL.md").write_text(
+            dsh_skill_content(skill_name, description, text), encoding="utf-8")
+    for fid, text, desc in domains:
+        skill_name = f"selfdistill-{fid}"
+        (cc / "skills" / skill_name).mkdir(parents=True, exist_ok=True)
+        (cc / "skills" / skill_name / "SKILL.md").write_text(
+            dsh_skill_content(skill_name, desc, text), encoding="utf-8")
+
+
 
 # ---------- main ----------
 
@@ -1066,7 +1086,8 @@ def main() -> int:
         (DIST / f"{slug}-raw.html").write_text(build_raw(title, text, assets), encoding="utf-8")
 
     build_targets(l1, l2, l3, domains)
-    print(f"完成：dist/index.html + 内页/原始报告 + codex/ + hermes/ + dsh/ + workbuddy/（L4 领域 {len(domains)} 个）。")
+    print(f"完成：dist/index.html + 内页/原始报告 + codex/ + hermes/ + dsh/ + workbuddy/ + claude/"
+          f"（L4 领域 {len(domains)} 个）。")
     return 0
 
 
