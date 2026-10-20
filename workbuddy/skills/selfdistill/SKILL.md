@@ -1,6 +1,6 @@
 ---
 name: selfdistill
-description: 把用户与 AI 的聊天记录蒸馏成 L1–L4 个人档案（selfdistill 工作流）：整理导出、提炼候选、逐条确认、构建 HTML、写回 WorkBuddy 或 Codex/Hermes/DSH。用户提到 selfdistill、蒸馏、个人档案、写回 workbuddy 时使用。
+description: 把用户与 AI 的聊天记录蒸馏成 L1–L4 个人档案（selfdistill 工作流）：整理导出、提炼候选、逐条确认、构建 HTML、写回 WorkBuddy 或 Codex/Claude Code/Hermes/DSH。用户提到 selfdistill、蒸馏、个人档案、写回 workbuddy 时使用。
 metadata:
   version: "0.1.0"
 ---
@@ -59,11 +59,11 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天�
 
 ```bash
 cd <selfdistill 仓库>
-python3 build.py                # 生成 dist/（HTML 可视化 + codex/ + hermes/ + dsh/ + workbuddy/）
+python3 build.py                # 生成 dist/（HTML 可视化 + codex/ + claude/ + hermes/ + dsh/ + workbuddy/）
 python3 build.py --include-private   # 额外包含私密 L3（默认排除）
 ```
 
-- 产物：`dist/index.html`（可视化）、`dist/workbuddy/`（WorkBuddy 写回产物）、`dist/dsh/`、`dist/codex/`、`dist/hermes/`。
+- 产物：`dist/index.html`（可视化）、`dist/workbuddy/`（WorkBuddy 写回产物）、`dist/dsh/`、`dist/codex/`、`dist/claude/`、`dist/hermes/`。
 
 ### 6. 写回 WorkBuddy（install.py --target workbuddy）
 

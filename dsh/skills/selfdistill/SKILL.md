@@ -1,12 +1,12 @@
 ---
 name: selfdistill
-description: 把用户与 AI 的聊天记录蒸馏成 L1–L4 个人档案（selfdistill 工作流）：整理导出、提炼候选、逐条确认、构建 HTML、写回 DSH 或 Codex/Hermes。用户提到 selfdistill、蒸馏、个人档案、写回 DSH 时使用。
-whenToUse: 用户要建立或更新 L1–L4 个人档案、蒸馏与 AI 的聊天记录、把档案写回 DSH/Codex/Hermes，或要求你接手 selfdistill 项目时。
+description: 把用户与 AI 的聊天记录蒸馏成 L1–L4 个人档案（selfdistill 工作流）：整理导出、提炼候选、逐条确认、构建 HTML、写回 DSH 或 Codex/Claude Code/Hermes。用户提到 selfdistill、蒸馏、个人档案、写回 DSH 时使用。
+whenToUse: 用户要建立或更新 L1–L4 个人档案、蒸馏与 AI 的聊天记录、把档案写回 DSH/Codex/Claude Code/Hermes，或要求你接手 selfdistill 项目时。
 ---
 
 # selfdistill · 蒸馏工作流（DeepSeek Harness 版）
 
-selfdistill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天记录，在 **AI 辅助 + 人工确认** 下蒸馏成看得见、带来源、AI 也用得上的 L1–L4 个人档案，并写回 AI 工具（DSH / Codex / Hermes）。
+selfdistill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天记录，在 **AI 辅助 + 人工确认** 下蒸馏成看得见、带来源、AI 也用得上的 L1–L4 个人档案，并写回 AI 工具（DSH / Codex / Claude Code / Hermes）。
 
 | 层级 | 内容 | 通俗解释 |
 |------|------|----------|
@@ -55,11 +55,11 @@ selfdistill 是一个「AI 自我蒸馏」工具包：把用户与 AI 的聊天�
 
 ```bash
 cd <selfdistill 仓库>
-python3 build.py                # 生成 dist/（HTML 可视化 + codex/ + hermes/ + dsh/）
+python3 build.py                # 生成 dist/（HTML 可视化 + codex/ + claude/ + hermes/ + dsh/）
 python3 build.py --include-private   # 额外包含私密 L3（默认排除）
 ```
 
-- 产物：`dist/index.html`（可视化）、`dist/dsh/`（DSH 写回产物）、`dist/codex/`、`dist/hermes/`。
+- 产物：`dist/index.html`（可视化）、`dist/dsh/`（DSH 写回产物）、`dist/codex/`、`dist/claude/`、`dist/hermes/`。
 
 ### 6. 写回 DSH（install.py --target dsh）
 
@@ -72,7 +72,7 @@ python3 install.py --target dsh
   - **L2/L3/L4 写成 `~/.dsh/skills/` 下的 skill**（按需加载，敏感内容不默认进入每个对话）。
 - 先展示 diff，**用户确认后才写入**；`--yes` 可跳过确认（慎用）。
 - 重复安装增量合并；目标文件已存在但无 selfdistill 标记时拒绝覆盖。
-- 写回 Codex/Hermes：`python3 install.py --target codex` / `--target hermes`（同样先展示 diff）。
+- 写回 Codex/Claude Code/Hermes：`python3 install.py --target codex` / `--target claude` / `--target hermes`（同样先展示 diff）。
 
 ### 7. 持续更新（有新对话后）
 
