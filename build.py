@@ -394,8 +394,8 @@ I18N: dict[str, dict[str, str]] = {
                        "en": "All content below is fictional sample data; it does not represent a real person."},
     "hero.meta.canonical": {"zh": "📁 档案目录：<code>workspace/canonical/</code>",
                             "en": "📁 Profile dir: <code>workspace/canonical/</code>"},
-    "hero.meta.writeback": {"zh": "🔗 写回：Codex / Hermes / DSH",
-                            "en": "🔗 Write-back: Codex / Hermes / DSH"},
+    "hero.meta.writeback": {"zh": "🔗 写回：Codex / Claude Code / Hermes / DSH / WorkBuddy",
+                            "en": "🔗 Write-back: Codex / Claude Code / Hermes / DSH / WorkBuddy"},
     "hero.meta.l3": {"zh": "🔒 L3 含敏感块，默认不加载",
                      "en": "🔒 L3 has private blocks, not loaded by default"},
     "kpi.layers.label": {"zh": "核心层", "en": "Core layers"},
@@ -405,7 +405,7 @@ I18N: dict[str, dict[str, str]] = {
     "kpi.domains.label": {"zh": "领域手册", "en": "Domain playbooks"},
     "kpi.domains.hint": {"zh": "按任务加载，不全量常驻", "en": "Loaded per task, not always resident"},
     "kpi.targets.label": {"zh": "写回目标", "en": "Write-back targets"},
-    "kpi.targets.hint": {"zh": "Codex / Hermes / DSH", "en": "Codex / Hermes / DSH"},
+    "kpi.targets.hint": {"zh": "Codex / Claude Code / Hermes / DSH / WorkBuddy", "en": "Codex / Claude Code / Hermes / DSH / WorkBuddy"},
     "files.head": {"zh": "4 个核心文件", "en": "4 core files"},
     "files.hint": {"zh": "职责分离 · 互不重叠 · 冲突时按优先级裁决",
                    "en": "Separate concerns · non-overlapping · conflicts resolved by priority"},
@@ -678,7 +678,7 @@ def build_home(domains: list, sizes: dict, assets: dict) -> str:
         '<p class="simulated-banner" data-i18n="hero.simulated">以下内容为虚构示例，不代表真实个人身份。</p>'
         '<div class="hero-meta">'
         '<span data-i18n-html="hero.meta.canonical">📁 档案目录：<code>workspace/canonical/</code></span>'
-        '<span data-i18n="hero.meta.writeback">🔗 写回：Codex / Hermes / DSH</span>'
+        '<span data-i18n="hero.meta.writeback">🔗 写回：Codex / Claude Code / Hermes / DSH / WorkBuddy</span>'
         '<span data-i18n="hero.meta.l3">🔒 L3 含敏感块，默认不加载</span>'
         '</div></header>'
     )
@@ -694,9 +694,9 @@ def build_home(domains: list, sizes: dict, assets: dict) -> str:
         f'<div class="kpi animate delay-3"><div class="num" data-count="{len(domains)}">{len(domains)}</div>'
         f'<div class="label" data-i18n="kpi.domains.label">领域手册</div>'
         f'<div class="hint" data-i18n="kpi.domains.hint">按任务加载，不全量常驻</div></div>'
-        f'<div class="kpi animate delay-4"><div class="num" data-count="3">3</div>'
+        f'<div class="kpi animate delay-4"><div class="num" data-count="5">5</div>'
         f'<div class="label" data-i18n="kpi.targets.label">写回目标</div>'
-        f'<div class="hint" data-i18n="kpi.targets.hint">Codex / Hermes / DSH</div></div>'
+        f'<div class="hint" data-i18n="kpi.targets.hint">Codex / Claude Code / Hermes / DSH / WorkBuddy</div></div>'
         '</div></section>'
     )
 
